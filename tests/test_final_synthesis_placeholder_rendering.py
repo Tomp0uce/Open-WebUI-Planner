@@ -1,0 +1,113 @@
+from __future__ import annotations
+
+import asyncio
+import re
+from datetime import datetime
+from pathlib import Path
+import sys
+from typing import Any
+
+sys.path.append(str(Path(__file__).resolve().parents[1]))
+
+from planner import Action, Pipe, Plan  # noqa: E402
+
+
+class FinalSynthesisRenderingPipe(Pipe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.captured_messages: list[str] = []
+        self.__current_event_emitter__ = self._capture_event  # type: ignore[assignment]
+        self.__current_event_call__ = self._noop_event_call  # type: ignore[assignment]
+        self.valves.SHOW_ACTION_SUMMARIES = False
+
+    async def _capture_event(self, event: dict[str, Any]) -> None:
+        if event["type"] == "message":
+            self.captured_messages.append(event["data"]["content"])
+        # Other event types are not relevant for this test but must be absorbed.
+
+    async def _noop_event_call(self, *_args: Any, **_kwargs: Any) -> str:
+        return ""
+
+    async def execute_action(  # type: ignore[override]
+        self,
+        plan: Plan,
+        action: Action,
+        context: dict[str, Any],
+        step_number: int,
+    ) -> dict[str, str]:
+        outputs = {
+            "executive_summary": {
+                "primary_output": "Summary content with clear narrative.",
+                "supporting_details": "Compiled from prior research.",
+            },
+            "product_objectives": {
+                "primary_output": "- Objective one\n- Objective two",
+                "supporting_details": "Prioritized deliverables list.",
+            },
+        }
+
+        if action.id not in outputs:
+            raise AssertionError(f"Unexpected action requested in test: {action.id}")
+
+        result = outputs[action.id]
+        action.output = result
+        action.status = "completed"
+        action.end_time = datetime.now().strftime("%H:%M:%S")
+        return result
+
+    async def review_final_deliverable(  # type: ignore[override]
+        self,
+        plan: Plan,
+        assembled_output: str,
+        default_supporting_details: str = "Final synthesis completed",
+    ) -> dict[str, str]:
+        return {
+            "primary_output": assembled_output,
+            "supporting_details": default_supporting_details,
+        }
+
+
+def run_execute_plan(pipe: FinalSynthesisRenderingPipe, plan: Plan) -> None:
+    asyncio.run(pipe.execute_plan(plan))
+
+
+def test_final_synthesis_replaces_double_brace_placeholders() -> None:
+    pipe = FinalSynthesisRenderingPipe()
+
+    plan = Plan(
+        goal="Validate final synthesis rendering",
+        actions=[
+            Action(
+                id="executive_summary",
+                type="text",
+                description="Draft the executive summary",
+            ),
+            Action(
+                id="product_objectives",
+                type="text",
+                description="List the key objectives",
+            ),
+            Action(
+                id="final_synthesis",
+                type="text",
+                description=(
+                    "Final Deliverable: OptiScan IR – Portable Ocular Pre-Diagnosis Device\n"
+                    "Executive Summary\n{{executive_summary}}\n\n"
+                    "Product Objectives\n{{product_objectives}}"
+                ),
+                dependencies=["executive_summary", "product_objectives"],
+            ),
+        ],
+    )
+
+    run_execute_plan(pipe, plan)
+
+    final_action = next(a for a in plan.actions if a.id == "final_synthesis")
+    assert final_action.output is not None
+
+    primary_output = final_action.output.get("primary_output", "")
+    assert primary_output, "Final synthesis output should not be empty"
+    assert "{{" not in primary_output
+    assert re.search(r"\{[^}]+\}", primary_output) is None
+    assert "Summary content with clear narrative." in primary_output
+    assert "- Objective one" in primary_output

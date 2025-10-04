@@ -3220,18 +3220,25 @@ Google's Gemini Advancements..."}
 
                 final_output = final_output_template
                 for action_id in placeholder_ids:
-                    placeholder = f"{{{action_id}}}"
+                    single_placeholder = f"{{{action_id}}}"
+                    double_placeholder = f"{{{{{action_id}}}}}"
+
                     if action_id in completed_results:
                         dependency_output = completed_results[action_id].get(
                             "primary_output", ""
                         )
+
                         final_output = final_output.replace(
-                            placeholder, dependency_output
+                            double_placeholder, dependency_output
+                        )
+                        final_output = final_output.replace(
+                            single_placeholder, dependency_output
                         )
                     else:
-                        logger.warning(
-                            f"Could not find output for placeholder '{placeholder}'. It may have failed or was not executed. It will be left in the final output."
-                        )
+                        if single_placeholder in final_output or double_placeholder in final_output:
+                            logger.warning(
+                                f"Could not find output for placeholder '{single_placeholder}'. It may have failed or was not executed. It will be left in the final output."
+                            )
 
                 action.output = await self.review_final_deliverable(
                     plan,
@@ -3588,9 +3595,14 @@ Google's Gemini Advancements..."}
                     preview_content = action.output.get("primary_output", "")
                     if len(preview_content) > 200:
                         preview_content = preview_content[:200] + "..."
+                    replacement = f"✅ [{placeholder_id}]: {preview_content}"
+                    preview_template = preview_template.replace(
+                        f"{{{{{placeholder_id}}}}}",
+                        replacement,
+                    )
                     preview_template = preview_template.replace(
                         f"{{{placeholder_id}}}",
-                        f"✅ [{placeholder_id}]: {preview_content}",
+                        replacement,
                     )
 
             for placeholder_id in template_placeholders:
@@ -3598,8 +3610,12 @@ Google's Gemini Advancements..."}
                     (a for a in pending_actions if a.id == placeholder_id), None
                 )
                 if action:
+                    pending_text = f"⏳ [{placeholder_id}]: Pending..."
                     preview_template = preview_template.replace(
-                        f"{{{placeholder_id}}}", f"⏳ [{placeholder_id}]: Pending..."
+                        f"{{{{{placeholder_id}}}}}", pending_text
+                    )
+                    preview_template = preview_template.replace(
+                        f"{{{placeholder_id}}}", pending_text
                     )
 
             final_synthesis_content = f"""<details>
