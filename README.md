@@ -51,6 +51,12 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 - `ACTION_TIMEOUT` (300): Individual action timeout
 - `SHOW_ACTION_SUMMARIES` (true): Detailed execution summaries
 - `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT` (false): AI-enhanced requirements
+- `ENABLE_TOOL_INTEGRATION` (true): Enable automatic tool discovery, usage, scoring impact, and prompt adaptations. Set to `false` to completely ignore Open WebUI tools.
+
+**Testing:**
+
+- `python -m compileall planner.py`: quick syntax verification
+- `python planner.py`: runs the built-in no-tool-mode regression tests (uses lightweight stubs, no Open WebUI instance required)
 
 ### 💡 Usage Examples
 
