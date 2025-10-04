@@ -2248,6 +2248,42 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             False,
         )
 
+    def _summarize_quality_reflection(self, reflection: ReflectionResult) -> str:
+        """Create a concise textual summary explaining the reflection result."""
+
+        issues = [issue.strip() for issue in reflection.issues if issue.strip()]
+        if issues:
+            displayed = issues[:2]
+            summary = "; ".join(displayed)
+            remaining = len(issues) - len(displayed)
+            if remaining > 0:
+                summary += f"; +{remaining} more issue{'s' if remaining > 1 else ''}"
+            return f"Issues - {summary}"
+
+        suggestions = [
+            suggestion.strip() for suggestion in reflection.suggestions if suggestion.strip()
+        ]
+        if suggestions:
+            displayed = suggestions[:2]
+            summary = "; ".join(displayed)
+            remaining = len(suggestions) - len(displayed)
+            if remaining > 0:
+                summary += f"; +{remaining} more suggestion{'s' if remaining > 1 else ''}"
+            return f"Suggestions - {summary}"
+
+        if reflection.is_successful:
+            return "Output meets requirements with no flagged issues."
+
+        return "No diagnostic details were provided for this score."
+
+    def _format_quality_status(self, reflection: ReflectionResult) -> str:
+        """Create the status message displayed after output analysis."""
+
+        summary = self._summarize_quality_reflection(reflection)
+        return (
+            f"Analyzed output (Quality Score: {reflection.quality_score:.2f} | Notes: {summary})"
+        )
+
     async def execute_action(
         self, plan: Plan, action: Action, context: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
@@ -2468,9 +2504,10 @@ Focus ONLY on this specific step's output.
                     output=response,
                 )
 
+                quality_status = self._format_quality_status(current_reflection)
                 await self.emit_status(
                     "info",
-                    f"Analyzed output (Quality Score: {current_reflection.quality_score:.2f})",
+                    quality_status,
                     False,
                 )
 
@@ -2873,6 +2910,108 @@ Google's Gemini Advancements..."}
             suggestions=["Retry the action."],
         )
 
+    async def review_final_deliverable(
+        self,
+        plan: Plan,
+        assembled_output: str,
+        default_supporting_details: str = "Final synthesis completed",
+    ) -> dict[str, str]:
+        """Run a focused editorial review over the assembled final deliverable."""
+
+        await self.emit_status(
+            "info",
+            "Reviewing final deliverable for coherence and quality...",
+            False,
+        )
+
+        review_prompt = textwrap.dedent(
+            f"""
+            You are a senior product editor performing the final quality pass on a deliverable.
+
+            OVERALL GOAL: {plan.goal}
+
+            ASSEMBLED DELIVERABLE (direct output shown below):
+            ---
+            {assembled_output}
+            ---
+
+            REVIEW OBJECTIVES:
+            1. Preserve ALL factual details and sections from the assembled deliverable. Do **not** summarize or shorten content.
+               Expand sections when clarification or connective text is required to improve cohesion.
+            2. Ensure the structure flows logically with clear headings, transitions, and formatting consistency.
+            3. Resolve redundancy, contradictions, or abrupt jumps introduced by concatenating multiple steps.
+            4. Highlight any remaining gaps or risks in supporting details so the team knows what to revisit.
+
+            OUTPUT REQUIREMENTS (JSON ONLY):
+            {{
+                "primary_output": "Improved deliverable in Markdown, equal or longer in detail than the input.",
+                "supporting_details": "Bullet list summarizing editorial adjustments, open issues, or follow-up notes."
+            }}
+
+            Maintain professional French/English mixing as given, and keep actionable sections explicit.
+            Return only the JSON object with no additional commentary.
+            """
+        ).strip()
+
+        review_format: dict[str, Any] = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "final_deliverable_review",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "primary_output": {"type": "string"},
+                        "supporting_details": {"type": "string"},
+                    },
+                    "required": ["primary_output", "supporting_details"],
+                    "additionalProperties": False,
+                },
+            },
+        }
+
+        try:
+            review_response = await self.get_completion(
+                prompt=review_prompt,
+                format=review_format,
+                action_results={},
+                action=None,
+            )
+
+            cleaned_response = clean_json_response(review_response)
+            review_data = json.loads(cleaned_response)
+
+            refined_primary = str(review_data.get("primary_output", "")).strip()
+            refined_supporting = str(review_data.get("supporting_details", "")).strip()
+
+            if not refined_primary:
+                raise ValueError("Reviewed deliverable returned an empty primary_output")
+
+            await self.emit_status(
+                "success",
+                "Final deliverable review completed.",
+                False,
+            )
+
+            return {
+                "primary_output": refined_primary,
+                "supporting_details": refined_supporting or default_supporting_details,
+            }
+
+        except Exception as review_error:  # noqa: BLE001
+            logger.warning(
+                "Final deliverable review failed: %s", review_error, exc_info=True
+            )
+            await self.emit_status(
+                "warning",
+                "Final review failed; using assembled deliverable without edits.",
+                False,
+            )
+            return {
+                "primary_output": assembled_output,
+                "supporting_details": default_supporting_details,
+            }
+
     async def execute_plan(self, plan: Plan) -> None:
         """
         Execute the complete plan based on dependencies.
@@ -2951,10 +3090,11 @@ Google's Gemini Advancements..."}
                             f"Could not find output for placeholder '{placeholder}'. It may have failed or was not executed. It will be left in the final output."
                         )
 
-                action.output = {
-                    "primary_output": final_output,
-                    "supporting_details": "Final synthesis completed",
-                }
+                action.output = await self.review_final_deliverable(
+                    plan,
+                    final_output,
+                    default_supporting_details="Final synthesis completed",
+                )
                 action.status = "completed"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
                 completed.add(action.id)
