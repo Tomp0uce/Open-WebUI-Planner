@@ -680,6 +680,55 @@ WORKING GUIDELINES:
         prompt_sections = [base_intro, access_lines, metadata_block, reminders]
         return "\n\n".join(section for section in prompt_sections if section)
 
+    def _build_retry_guidance(
+        self,
+        action: Action,
+        reflection: ReflectionResult | None,
+        previous_tool_calls: list[str],
+    ) -> str:
+        """Create a human-readable guidance block for retry attempts."""
+
+        guidance_lines: list[str] = []
+
+        if reflection:
+            guidance_lines.append("🔁 PREVIOUS ATTEMPT FEEDBACK")
+            guidance_lines.append(
+                f"- Quality score last attempt: {reflection.quality_score:.2f}"
+            )
+            if reflection.issues:
+                guidance_lines.append("- Issues to fix:")
+                guidance_lines.extend(f"  • {issue}" for issue in reflection.issues)
+            if reflection.suggestions:
+                guidance_lines.append("- Apply these corrections now:")
+                guidance_lines.extend(
+                    f"  • {suggestion}" for suggestion in reflection.suggestions
+                )
+
+        if self.tool_integration_enabled and action.tool_ids:
+            if not previous_tool_calls:
+                guidance_lines.append(
+                    "- No tools were called previously. Select and invoke the relevant tool(s) now:"
+                )
+                guidance_lines.append(
+                    f"  • Available tools: {', '.join(action.tool_ids)}"
+                )
+            else:
+                guidance_lines.append(
+                    f"- Tools previously called: {', '.join(previous_tool_calls)}"
+                )
+                guidance_lines.append(
+                    "  • Review their outputs and adjust parameters or call additional tools to resolve the issues above."
+                )
+
+        if not guidance_lines:
+            return ""
+
+        guidance_lines.append(
+            "- Deliver a revised attempt that resolves every point above before finalizing."
+        )
+
+        return "\n".join(guidance_lines)
+
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
@@ -2273,15 +2322,26 @@ Context from dependent steps:
 Focus ONLY on this specific step's output.
 """
 
+        base_prompt_template = base_prompt
         attempts_remaining = self.valves.MAX_RETRIES
         best_output = None
         best_reflection = None
         best_quality_score = -1
+        previous_reflection: ReflectionResult | None = None
+        previous_tool_calls: list[str] = []
         while attempts_remaining >= 0:
             try:
                 current_attempt = self.valves.MAX_RETRIES - attempts_remaining
 
+                attempt_prompt = base_prompt_template
+
                 if current_attempt > 0:
+                    guidance_block = self._build_retry_guidance(
+                        action, previous_reflection, previous_tool_calls
+                    )
+                    if guidance_block:
+                        attempt_prompt = f"{base_prompt_template}\n\n{guidance_block}"
+
                     action.tool_calls.clear()
                     action.tool_results.clear()
 
@@ -2291,36 +2351,6 @@ Focus ONLY on this specific step's output.
                         f"Attempt {current_attempt + 1}/{self.valves.MAX_RETRIES + 1} for action {action.id}",
                         False,
                     )
-
-                if current_attempt > 0 and best_reflection:
-                    retry_guidance = ""
-                    if self.tool_integration_enabled:
-                        if action.tool_ids and not action.tool_calls:
-                            retry_guidance += f"""
-
-                            IMPORTANT: You have access to these tools: {action.tool_ids}
-                            Your previous attempt did not use any tools, which may be why it failed.
-                            Consider using the appropriate tools to complete this task effectively.
-                            """
-                        elif action.tool_ids and action.tool_calls:
-                            retry_guidance += f"""
-
-                            Your previous attempt used tools: {action.tool_calls}
-                            But the output was still inadequate. Try different approaches or parameters.
-                            """
-
-                    base_prompt += f"""
-                        
-                        Previous attempt had these issues:
-                        {json.dumps(best_reflection.issues, indent=2)}
-                        
-                        Required corrections based on suggestions:
-                        {json.dumps(best_reflection.suggestions, indent=2)}
-                        
-                        {retry_guidance}
-                        
-                        Please address ALL issues above in this new attempt.
-                        """
 
                 try:
                     tools: dict[str, dict[Any, Any]] = {}
@@ -2372,7 +2402,7 @@ Focus ONLY on this specific step's output.
                     response = await self.get_completion(
                         prompt=[
                             {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": base_prompt},
+                            {"role": "user", "content": attempt_prompt},
                         ],
                         model=execution_model,
                         tools=tools,
@@ -2443,6 +2473,9 @@ Focus ONLY on this specific step's output.
                     f"Analyzed output (Quality Score: {current_reflection.quality_score:.2f})",
                     False,
                 )
+
+                previous_reflection = current_reflection
+                previous_tool_calls = list(action.tool_calls)
 
                 if current_reflection.quality_score >= best_quality_score:
                     best_output = current_output
@@ -2590,6 +2623,7 @@ Focus ONLY on this specific step's output.
             header_lines.extend(
                 [
                     "Tool integration is disabled for this evaluation; assess the output solely on the provided context and content.",
+                    "Do not penalize the output for missing tool calls; tools are unavailable in this mode.",
                     "",
                 ]
             )
@@ -2650,8 +2684,11 @@ Focus ONLY on this specific step's output.
                 "**Tool Results Placement**: Tool outputs are lost if not surfaced in primary_output. Ensure any generated assets or URLs are explicitly included there.",
             )
         else:
-            instructions_points.append(
-                "**Self-Containment**: Ensure all critical content is present in primary_output; do not rely on unavailable external tools or implicit context.",
+            instructions_points.extend(
+                [
+                    "**No Tool Penalty**: Tools are unavailable; do not reduce the quality_score because a tool was not used.",
+                    "**Self-Containment**: Ensure all critical content is present in primary_output; do not rely on unavailable external tools or implicit context.",
+                ]
             )
 
         instructions_block = "\n".join(
