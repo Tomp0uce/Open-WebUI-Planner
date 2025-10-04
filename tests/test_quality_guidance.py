@@ -5,7 +5,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from planner import Pipe, Plan, Action  # noqa: E402
+from planner import Pipe, Plan, Action, ReflectionResult  # noqa: E402
 from open_webui.models.users import User  # noqa: E402
 
 
@@ -16,7 +16,10 @@ class StubPipe(Pipe):
         self.analysis_prompts: list[str] = []
         self.action_responses: list[str] = []
         self.analysis_responses: list[str] = []
+        self.final_review_prompts: list[str] = []
+        self.final_review_responses: list[str] = []
         self.simulated_tool_call_sequence: list[list[str]] = []
+        self.status_events: list[tuple[str, str, bool]] = []
 
         async def _noop_emit(_event):
             return None
@@ -52,17 +55,29 @@ class StubPipe(Pipe):
 
             return response
 
+        if (
+            format
+            and isinstance(format, dict)
+            and format.get("json_schema", {})
+            and isinstance(format["json_schema"], dict)
+            and format["json_schema"].get("name") == "final_deliverable_review"
+        ):
+            self.final_review_prompts.append(prompt)  # type: ignore[arg-type]
+            return self.final_review_responses.pop(0)
+
         self.analysis_prompts.append(prompt)  # type: ignore[arg-type]
         return self.analysis_responses.pop(0)
 
-    async def emit_status(self, *_args, **_kwargs) -> None:  # type: ignore[override]
-        return
+    async def emit_status(
+        self, level: str, message: str, sticky: bool
+    ) -> None:  # type: ignore[override]
+        self.status_events.append((level, message, sticky))
 
     async def emit_message(self, *_args, **_kwargs) -> None:  # type: ignore[override]
         return
 
-    async def emit_full_state(self, *_args, **_kwargs) -> None:  # type: ignore[override]
-        return
+    async def emit_full_state(self, *_args, **_kwargs) -> str:  # type: ignore[override]
+        return ""
 
     async def emit_replace(self, *_args, **_kwargs) -> None:  # type: ignore[override]
         return
@@ -94,6 +109,7 @@ def run_async(coro):
 def test_analyze_output_prompt_disables_tool_penalties() -> None:
     pipe = StubPipe()
     pipe.valves.ENABLE_TOOL_INTEGRATION = False
+    pipe.valves.MAX_RETRIES = 0
 
     plan = Plan(goal="Goal", actions=[])
     action = Action(
@@ -225,3 +241,101 @@ def test_retry_feedback_reports_previous_tool_usage() -> None:
 
     assert "Tools previously called: search_tool" in retry_user_prompt
     assert "did not use any tools" not in retry_user_prompt.lower()
+
+
+def test_analyzed_output_status_includes_issue_summary() -> None:
+    pipe = StubPipe()
+
+    reflection = ReflectionResult(
+        is_successful=False,
+        quality_score=0.2,
+        issues=[
+            "Missing introduction hook",
+            "No transition into the body section",
+            "Tone does not match brief",
+        ],
+        suggestions=[
+            "Add a compelling hook and smooth transition into the next section.",
+        ],
+    )
+
+    status_message = pipe._format_quality_status(reflection)
+
+    assert (
+        status_message
+        == "Analyzed output (Quality Score: 0.20 | Notes: Issues - Missing introduction hook; No transition into the body section; +1 more issue)"
+    )
+
+
+def test_analyzed_output_status_high_quality_has_positive_note() -> None:
+    pipe = StubPipe()
+
+    reflection = ReflectionResult(
+        is_successful=True,
+        quality_score=0.95,
+        issues=[],
+        suggestions=[],
+    )
+
+    status_message = pipe._format_quality_status(reflection)
+
+    assert (
+        status_message
+        == "Analyzed output (Quality Score: 0.95 | Notes: Output meets requirements with no flagged issues.)"
+    )
+
+
+def test_final_deliverable_review_applies_enhanced_output() -> None:
+    pipe = StubPipe()
+    pipe.valves.ENABLE_TOOL_INTEGRATION = False
+
+    research_action = Action(
+        id="research",
+        type="text",
+        description="Research background",
+    )
+    final_action = Action(
+        id="final_synthesis",
+        type="template",
+        description="# Initial Report\n\n{research}\n",
+        dependencies=["research"],
+    )
+
+    plan = Plan(goal="Deliver a detailed report", actions=[research_action, final_action])
+
+    pipe.action_responses = [
+        json.dumps({"primary_output": "Background findings", "supporting_details": ""}),
+    ]
+
+    pipe.analysis_responses = [
+        json.dumps(
+            {
+                "is_successful": True,
+                "quality_score": 0.9,
+                "issues": [],
+                "suggestions": [],
+            }
+        ),
+    ]
+
+    pipe.final_review_responses = [
+        json.dumps(
+            {
+                "primary_output": "# Refined Report\n\n## Background\nBackground findings\n",
+                "supporting_details": "- Reorganized sections for clarity",
+            }
+        ),
+    ]
+
+    run_async(pipe.execute_plan(plan))
+
+    assert pipe.final_review_prompts, "Final review prompt should have been generated"
+    assert "Do **not** summarize" in pipe.final_review_prompts[0]
+
+    final_action_output = next(
+        a.output for a in plan.actions if a.id == "final_synthesis"
+    )
+
+    assert final_action_output is not None
+    assert final_action_output["primary_output"].startswith("# Refined Report")
+    assert final_action_output["supporting_details"] == "- Reorganized sections for clarity"

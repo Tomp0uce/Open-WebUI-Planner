@@ -20,6 +20,7 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 * **🧠 Intelligent Planning:** Automatically breaks down goals into actionable steps with dependency mapping
 * **🎨 Specialized Models:** Dedicated models for writing (WRITER_MODEL), coding (CODER_MODEL), and tool usage (ACTION_MODEL) with automatic routing
 * **🔍 Quality Control:** Real-time output analysis with quality scoring (0.0-1.0) and iterative improvement
+* **📝 Editorial Final Review:** Automatic post-synthesis review that expands and restructures the deliverable for coherent, detail-rich output
 * **🎭 Interactive Error Handling:** When actions fail or produce low-quality outputs, the system pauses and prompts you with options: retry with custom guidance/instructions, retry as-is, approve current output despite warnings, or abort the entire plan execution
 * **📊 Live Progress:** Real-time Mermaid diagrams with color-coded status indicators
 * **🧩 Template System:** Final synthesis using `{{action_id}}` placeholders for seamless content assembly
