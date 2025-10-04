@@ -1228,6 +1228,59 @@ WORKING GUIDELINES:
 
         return "\n".join(mermaid)
 
+    def _determine_final_synthesis_model(self) -> str:
+        """Select the most appropriate model for the fallback final_synthesis action."""
+
+        for candidate in (
+            self.valves.WRITER_MODEL,
+            self.valves.ACTION_MODEL,
+            getattr(self.valves, "MODEL", ""),
+        ):
+            if candidate:
+                return candidate
+        return ""
+
+    def _build_default_final_synthesis_action(self, plan: Plan) -> Action:
+        """Create a default final_synthesis action when the LLM omits it."""
+
+        preceding_actions = list(plan.actions)
+        dependencies: list[str] = []
+        template_lines: list[str]
+
+        if preceding_actions:
+            dependencies = list({action.id: None for action in preceding_actions}.keys())
+            template_lines = [
+                "Final Deliverable:",
+                "",
+                "Combine the following action outputs into a cohesive, polished response:",
+            ]
+            template_lines.extend(
+                [f"- {{{{{action.id}}}}}" for action in preceding_actions]
+            )
+            template_lines.extend(
+                [
+                    "",
+                    "Ensure transitions are smooth and the final answer directly addresses the user's goal.",
+                ]
+            )
+        else:
+            template_lines = [
+                "Final Deliverable:",
+                "",
+                "Provide a complete, polished response that fully resolves the user's goal.",
+            ]
+
+        description = "\n".join(template_lines).strip()
+
+        return Action(
+            id="final_synthesis",
+            type="text",
+            description=description,
+            tool_ids=[],
+            dependencies=dependencies,
+            model=self._determine_final_synthesis_model(),
+        )
+
     async def create_plan(self, goal: str) -> Plan:
         available_tools: list[dict[str, Any]] = []
         if self.tool_integration_enabled:
@@ -1544,15 +1597,17 @@ WORKING GUIDELINES:
                 )
 
                 if not any(a.id == "final_synthesis" for a in plan.actions):
-                    msg = "The generated plan is missing the required 'final_synthesis' action. This is a MANDATORY step that creates the final deliverable by combining outputs from previous steps. The final_synthesis template IS the actual content that will be delivered to the user."
-                    messages += [
-                        {
-                            "role": "assistant",
-                            "content": f"previous attempt: {clean_result}",
-                        },
-                        {"role": "user", "content": f"error:: {msg}"},
-                    ]
-                    raise ValueError(msg)
+                    await self.emit_status(
+                        "warning",
+                        "Generated plan missing required final_synthesis action. Injecting default template that references prior actions.",
+                        False,
+                    )
+                    logger.warning(
+                        "Plan missing final_synthesis; inserting default fallback template."
+                    )
+                    plan.actions.append(
+                        self._build_default_final_synthesis_action(plan)
+                    )
 
                 final_synthesis = next(
                     (a for a in plan.actions if a.id == "final_synthesis"), None
