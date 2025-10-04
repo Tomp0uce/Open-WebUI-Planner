@@ -241,6 +241,8 @@ class Pipe:
     __user__: User
     __model__: str
 
+    _TEXTUAL_CODE_FENCE_LANGUAGES = {"", "markdown", "md", "text", "txt"}
+
     class Valves(BaseModel):
         MODEL: str = Field(
             default="", description="Model to use (model id from ollama)"
@@ -3133,18 +3135,81 @@ Google's Gemini Advancements..."}
             }
         )
 
-    def clean_nested_markdown(self, text: str) -> str:
+    def _looks_like_markdown(self, text: str) -> bool:
+        """Heuristically determine if the provided text is Markdown."""
 
-        nested_image_in_text_pattern = (
-            r"!\[([^\]]*)\]\([^!\)]*!\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        markdown_patterns = [
+            r"^\s{0,3}#{1,6}\s",  # headings
+            r"^\s{0,3}[\-*+]\s",  # unordered lists
+            r"^\s{0,3}\d+\.\s",  # ordered lists
+            r"^\s{0,3}>\s",  # blockquotes
+            r"\[[^\]]+\]\([^\)]+\)",  # links/images
+            r"```mermaid",  # embedded mermaid diagrams
+        ]
+
+        return any(re.search(pattern, text, flags=re.MULTILINE) for pattern in markdown_patterns)
+
+    def unwrap_top_level_code_fence(self, text: str) -> str:
+        """Remove a single top-level code fence that wraps Markdown content."""
+
+        if not text:
+            return text
+
+        stripped = text.strip()
+        if not stripped.startswith("```"):
+            return text
+
+        fence_pattern = re.compile(
+            r"^```(?P<lang>[a-zA-Z0-9_-]*)[ \t]*\n(?P<body>[\s\S]*?)\n```[ \t]*$",
+            re.DOTALL,
+        )
+        match = fence_pattern.match(stripped)
+        if not match:
+            return text
+
+        language = match.group("lang").lower()
+        body = match.group("body")
+
+        should_unwrap = False
+        if language in self._TEXTUAL_CODE_FENCE_LANGUAGES:
+            should_unwrap = True
+        elif language == "" and self._looks_like_markdown(body):
+            should_unwrap = True
+        elif "```mermaid" in body:
+            should_unwrap = True
+
+        if not should_unwrap:
+            return text
+
+        return body.strip("\n")
+
+    def clean_nested_markdown(self, text: str) -> str:
+        mermaid_wrapped_pattern = re.compile(
+            r"!\[[^\]]*\]\(\s*```mermaid\s+([\s\S]*?)```\s*\)",
+            re.IGNORECASE,
+        )
+
+        def _unwrap_mermaid(match: re.Match[str]) -> str:
+            body = match.group(1).strip("\n")
+            return f"```mermaid\n{body}\n```"
+
+        text = mermaid_wrapped_pattern.sub(_unwrap_mermaid, text)
+
+        nested_image_in_text_pattern = re.compile(
+            r"!\[([^\]]*)\]\([^!\)]*!\[([^\]]*)\]\(([^)]+)\)[^)]*\)",
+            re.DOTALL,
         )
         text = re.sub(nested_image_in_text_pattern, r"![\2](\3)", text)
 
-        classic_nested_pattern = r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)"
+        classic_nested_pattern = re.compile(
+            r"!\[([^\]]*)\]\(!\[([^\]]*)\]\(([^)]+)\)\)",
+            re.DOTALL,
+        )
         text = re.sub(classic_nested_pattern, r"![\2](\3)", text)
 
-        nested_link_in_image_pattern = (
-            r"!\[([^\]]*)\]\([^!\)]*\[([^\]]*)\]\(([^)]+)\)[^)]*\)"
+        nested_link_in_image_pattern = re.compile(
+            r"!\[([^\]]*)\]\([^!\)]*\[([^\]]*)\]\(([^)]+)\)[^)]*\)",
+            re.DOTALL,
         )
         text = re.sub(nested_link_in_image_pattern, r"![\1](\3)", text)
 
@@ -3156,6 +3221,9 @@ Google's Gemini Advancements..."}
         """Format action output for user display (non-JSON format)"""
         primary_output = output.get("primary_output", "")
         supporting_details = output.get("supporting_details", "")
+
+        primary_output = self.unwrap_top_level_code_fence(primary_output)
+        supporting_details = self.unwrap_top_level_code_fence(supporting_details)
 
         primary_output = self.clean_nested_markdown(primary_output)
         supporting_details = self.clean_nested_markdown(supporting_details)
