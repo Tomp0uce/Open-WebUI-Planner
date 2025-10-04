@@ -61,7 +61,7 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 search the latest AI news and create a song based on that, with that , search for stock images to use a “album cover” and create a mockup of the spotify in a plain html file with vanilla js layout using those assets embeded for interactivity
 ```
 
-![Planner Agent Example](img/planner_2.png)
+![Planner Agent Example](https://github.com/Haervwe/open-webui-tools/blob/main/img/planner_2.png)
 *Example of Planner Agent in action Using Gemini 2.5 flash and local music generation*
 
 
@@ -71,7 +71,7 @@ search the latest AI news and create a song based on that, with that , search fo
 create an epic sci fi Adult novel based on the current trends on academia news and social media about AI and other trending topics, with at least 10 chapters, well crafter world with rich characters , save each chapter in a folter named as the novel in obsidian with an illustration
 ```
 
-![Planner Agent Example](img/planner_3.png)
+![Planner Agent Example](https://github.com/Haervwe/open-webui-tools/blob/main/img/planner_3.png)
 *Example of Planner Agent in action Using Gemini 2.5 flash and local image generation, local saving to obsidian and websearch*
 
 
@@ -89,7 +89,7 @@ you'll be prompted to either provide specific guidance ("try using a different a
 or decide whether to continue with the current output.
 ```
 
-![Planner Agent Example](img/planner_error.png)
+![Planner Agent Example](https://github.com/Haervwe/open-webui-tools/blob/main/img/planner_error.png)
 *Interactive error recovery dialog showing user options when an action encounters issues during plan execution*
 
 
@@ -100,5 +100,5 @@ or decide whether to continue with the current output.
 Create a fully-featured Conway's Game of Life SPA with responsive UI, game controls, and pattern presets using vanilla HTML/CSS/JS
 ```
 
-![Planner Agent Example](img/planner.png)
+![Planner Agent Example](https://github.com/Haervwe/open-webui-tools/raw/main/img/planner.png)
 *Example of Planner Agent in action Using local Hermes 8b (previous verision of the script)*
