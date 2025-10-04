@@ -166,6 +166,97 @@ def parse_structured_output(response: str) -> dict[str, str]:
     return {"primary_output": response, "supporting_details": ""}
 
 
+def _normalize_llm_item(value: Any) -> Any:
+    """Recursively convert dataclass/pydantic/attribute-based objects into primitive containers."""
+
+    if isinstance(value, dict):
+        return {key: _normalize_llm_item(val) for key, val in value.items()}
+
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_normalize_llm_item(item) for item in value]
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump()
+        except TypeError:  # pragma: no cover - unexpected signature
+            return {}
+        return _normalize_llm_item(dumped)
+
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):
+        try:
+            dumped = dict_method()
+        except TypeError:  # pragma: no cover - unexpected signature
+            return {}
+        return _normalize_llm_item(dumped)
+
+    if hasattr(value, "__iter__") and not isinstance(value, (str, bytes, bytearray)):
+        try:
+            return _normalize_llm_item(dict(value))
+        except Exception:
+            pass
+
+    if hasattr(value, "__dict__"):
+        return _normalize_llm_item(
+            {key: val for key, val in vars(value).items() if not key.startswith("_")}
+        )
+
+    return value
+
+
+def _ensure_dict(value: Any) -> dict[str, Any]:
+    """Ensure value is represented as a dictionary."""
+
+    normalized = _normalize_llm_item(value)
+    return normalized if isinstance(normalized, dict) else {}
+
+
+def parse_llm_response(
+    response_payload: Any,
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Return response content, normalized tool calls, and full normalized payload."""
+
+    response_dict = _ensure_dict(response_payload)
+
+    choices_raw = response_dict.get("choices", [])
+    if isinstance(choices_raw, (tuple, set, frozenset)):
+        choices_list = list(choices_raw)
+    elif isinstance(choices_raw, list):
+        choices_list = choices_raw
+    else:
+        choices_list = []
+
+    first_choice: dict[str, Any] = {}
+    if choices_list:
+        first_choice = _ensure_dict(choices_list[0])
+        choices_list[0] = first_choice
+        response_dict["choices"] = choices_list
+
+    message_dict: dict[str, Any] = {}
+    if first_choice:
+        message_dict = _ensure_dict(first_choice.get("message", {}))
+        first_choice["message"] = message_dict
+
+    content = str(message_dict.get("content", "")) if message_dict else ""
+
+    raw_tool_calls = message_dict.get("tool_calls") if message_dict else None
+    normalized_tool_calls = _normalize_llm_item(raw_tool_calls)
+    tool_calls: list[dict[str, Any]] = []
+
+    if isinstance(normalized_tool_calls, list):
+        for call in normalized_tool_calls:
+            call_dict = _ensure_dict(call)
+            function_dict = _ensure_dict(call_dict.get("function", {}))
+            call_dict["function"] = function_dict
+            tool_calls.append(call_dict)
+
+    if message_dict is not None:
+        message_dict["tool_calls"] = tool_calls
+
+    return content, tool_calls, response_dict
+
+
 class UserAbortedException(Exception):
     """Custom exception for when user aborts plan execution"""
 
@@ -913,21 +1004,18 @@ WORKING GUIDELINES:
                 form_data["tools"] = _tools
             if format and not tools:
                 form_data["response_format"] = format
-            response: dict[str, Any] = await generate_chat_completion(
+            response_payload = await generate_chat_completion(
                 self.__request__,
                 form_data,
                 user=self.__user__,
             )
-            response_content = response["choices"][0]["message"].get("content", "")
+            response_content, tool_calls, response = parse_llm_response(
+                response_payload
+            )
             if not self.tool_integration_enabled:
                 return clean_thinking_tags(response_content)
-            tool_calls: list[dict[str, Any]] | None = None
             logger.debug(f"{tool_calls}")
-            try:
-                tool_calls = response["choices"][0]["message"].get("tool_calls")
-            except Exception:
-                tool_calls = None
-            if not tool_calls or not isinstance(tool_calls, list):
+            if not tool_calls:
                 if response_content == "\n":
                     logger.debug(f"No tool calls: {response}")
                 return clean_thinking_tags(response_content)
@@ -3748,12 +3836,13 @@ Google's Gemini Advancements..."}
         self.__request__ = __request__
         self.user = __user__
         if __task__ and __task__ != TASKS.DEFAULT:
-            response: dict[str, Any] = await generate_chat_completion(  # type: ignore
+            response_payload = await generate_chat_completion(  # type: ignore
                 self.__request__,
                 {"model": model, "messages": body.get("messages"), "stream": False},
                 user=self.__user__,
             )
-            return f"{name}: {response['choices'][0]['message']['content']}"
+            response_content, _, _ = parse_llm_response(response_payload)
+            return f"{name}: {response_content}"
 
         self.__current_event_emitter__ = __event_emitter__  # type: ignore
         self.__current_event_call__ = __event_call__  # type: ignore
