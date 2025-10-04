@@ -11,10 +11,90 @@ import re
 import logging
 import json
 import asyncio
+import textwrap
+import sys
+import types
+
+if "fastapi" not in sys.modules:
+    fastapi_stub = types.ModuleType("fastapi")
+
+    class _StubRequest:  # pragma: no cover - only for tests
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    fastapi_stub.Request = _StubRequest
+    sys.modules["fastapi"] = fastapi_stub
+
 from fastapi import Request
 from typing import List, Dict, Optional, Callable, Awaitable, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
+
+if "open_webui.constants" not in sys.modules:
+    open_webui_root = sys.modules.setdefault("open_webui", types.ModuleType("open_webui"))
+    constants_module = types.ModuleType("open_webui.constants")
+
+    class _StubTASKS:  # pragma: no cover - only for tests
+        DEFAULT = "default"
+
+    constants_module.TASKS = _StubTASKS
+    utils_module = types.ModuleType("open_webui.utils")
+    chat_module = types.ModuleType("open_webui.utils.chat")
+
+    async def _stub_generate_chat_completion(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("generate_chat_completion stub called outside Open WebUI runtime")
+
+    chat_module.generate_chat_completion = _stub_generate_chat_completion
+
+    tools_utils_module = types.ModuleType("open_webui.utils.tools")
+
+    async def _stub_get_tools(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    tools_utils_module.get_tools = _stub_get_tools
+
+    models_module = types.ModuleType("open_webui.models")
+    users_module = types.ModuleType("open_webui.models.users")
+
+    class _StubUser:  # pragma: no cover - only for tests
+        id: str = "stub"
+
+    class _StubUsers:  # pragma: no cover - only for tests
+        @staticmethod
+        def get_user_by_id(*_args: Any, **_kwargs: Any) -> _StubUser:
+            return _StubUser()
+
+    users_module.User = _StubUser
+    users_module.Users = _StubUsers
+
+    tools_model_module = types.ModuleType("open_webui.models.tools")
+
+    class _StubToolMeta:  # pragma: no cover - only for tests
+        description: str = ""
+
+    class _StubTool:  # pragma: no cover - only for tests
+        def __init__(self, id: str = "", name: str = "", meta: Any | None = None) -> None:
+            self.id = id
+            self.name = name
+            self.meta = meta or _StubToolMeta()
+
+        @staticmethod
+        def get_tools() -> list[Any]:
+            return []
+
+    tools_model_module.Tools = _StubTool
+
+    open_webui_root.constants = constants_module
+    open_webui_root.utils = utils_module
+    open_webui_root.models = models_module
+    sys.modules.setdefault("open_webui.constants", constants_module)
+    sys.modules.setdefault("open_webui.utils", utils_module)
+    sys.modules.setdefault("open_webui.utils.chat", chat_module)
+    sys.modules.setdefault("open_webui.utils.tools", tools_utils_module)
+    sys.modules.setdefault("open_webui.models", models_module)
+    sys.modules.setdefault("open_webui.models.users", users_module)
+    sys.modules.setdefault("open_webui.models.tools", tools_model_module)
+
 from open_webui.constants import TASKS
 
 from open_webui.utils.chat import generate_chat_completion  # type: ignore
@@ -176,6 +256,13 @@ class Pipe:
             default="",
             description="Model to use for code/script generation actions (e.g., Coding specialized model). This model should focus ONLY on code generation and should NOT handle tool calls for post-processing like saving files. Create separate tool-based actions for any file operations.",
         )
+        ENABLE_TOOL_INTEGRATION: bool = Field(
+            default=True,
+            description=(
+                "Enable automatic discovery and usage of Open WebUI tools, including "
+                "prompt adjustments and quality scoring related to tool calls."
+            ),
+        )
         WRITER_SYSTEM_PROMPT: str = Field(
             default="""You are a Creative Writing Agent, specialized in generating high-quality narrative content, dialogue, and creative text. Your role is to focus on producing engaging, well-written content that matches the requested style and tone.
 
@@ -257,6 +344,20 @@ CRITICAL GUIDELINES:
 8. Always attach images in final responses as a markdown embedded images or other markdown embedable content with the ![caption](<image uri>) or [title](<hyperlink>)
 9. ALWAYS put the main deliverable/result in "primary_output" - this is what users and subsequent steps will see and use""",
             description="System prompt template for the Action Model",
+        )
+        ACTION_SYSTEM_PROMPT_NO_TOOLS: str = Field(
+            default="""You are the Action Agent, an expert at executing specific tasks within a larger plan. Your role is to focus solely on executing the current step using the provided context. Tool integrations are unavailable, so complete the step without relying on external tools.
+
+CRITICAL GUIDELINES:
+1. Focus EXCLUSIVELY on this step's task - do not try to solve the overall goal
+2. Use ONLY the outputs from listed dependencies - do not reference other steps
+3. Work entirely with the provided information; external tools and APIs are not available
+4. Produce a complete, self-contained output that can be used by dependent steps
+5. Never ask for clarification - work with what is provided
+6. Never output an empty message
+7. Present any images or hyperlinks directly in the response using markdown when needed
+8. ALWAYS put the main deliverable/result in "primary_output" - this is what users and subsequent steps will see and use""",
+            description="System prompt template for the Action Model when tool integration is disabled",
         )
         ACTION_PROMPT_REQUIREMENTS_TEMPLATE: str = Field(
             default="""Requirements:
@@ -348,6 +449,17 @@ ACTION-SPECIFIC REQUIREMENTS:
 - Focus on delivering thorough, complete information that users can learn from and act upon""",
             description="Additional requirements specifically for Action Model (tool-using) actions",
         )
+        ACTION_REQUIREMENTS_NO_TOOL_SUFFIX: str = Field(
+            default="""
+ACTION-SPECIFIC REQUIREMENTS (NO TOOL ACCESS):
+- Complete the task using ONLY the provided context and dependencies
+- Provide comprehensive, detailed responses that fully satisfy the action description
+- When referencing previous steps, quote or summarize the relevant primary_output content directly in your response
+- Ensure the output is self-contained so dependent steps can rely on it without extra processing
+- Present links or assets directly in the primary_output field using markdown when appropriate
+- Maintain clarity, structure, and completeness without assuming any external automation""",
+            description="Additional requirements for Action Model actions when tools are disabled",
+        )
         LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX: str = Field(
             default="""
 🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
@@ -375,6 +487,20 @@ EXAMPLE:
 
 Remember: Metadata = what's available. @action_id = how to get the real content.""",
             description="Additional requirements for actions using lightweight context mode",
+        )
+        LIGHTWEIGHT_CONTEXT_NO_TOOL_SUFFIX: str = Field(
+            default="""
+🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
+
+CONTEXT LIMITATIONS:
+- You receive metadata about previous actions rather than full content
+- Tool-based substitutions are unavailable, so you must infer or restate needed details manually
+
+WORKING GUIDELINES:
+- Use the metadata and supporting_details to understand what content is available
+- Reference prior outputs explicitly in your response when they are required for continuity
+- Ensure the final message remains complete and comprehensible without relying on hidden content""",
+            description="Additional requirements for lightweight context when tools are disabled",
         )
         ENABLE_LIGHTWEIGHT_CONTEXT_OPTIMIZATION: bool = Field(
             default=True,
@@ -429,6 +555,145 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
         self.valves = self.Valves()
         self.current_output = ""
 
+    @property
+    def tool_integration_enabled(self) -> bool:
+        """Return True when tool integration should be active."""
+
+        return bool(self.valves.ENABLE_TOOL_INTEGRATION)
+
+    def _format_dependency_metadata(
+        self, dependency_id: str, dependency_result: dict[str, Any] | None
+    ) -> dict[str, Any]:
+        """Format dependency metadata for lightweight context prompts."""
+
+        primary_output = ""
+        supporting_details = ""
+        if dependency_result:
+            primary_output = str(dependency_result.get("primary_output", ""))
+            supporting_details = str(
+                dependency_result.get("supporting_details", "")
+            )
+
+        content_type = "unknown"
+        if primary_output:
+            if primary_output.startswith("#"):
+                content_type = "markdown document"
+            elif primary_output.startswith("```"):
+                content_type = "code"
+            elif "http" in primary_output and any(
+                ext in primary_output.lower() for ext in ["jpg", "png", "gif"]
+            ):
+                content_type = "image URL"
+            elif primary_output.startswith("http"):
+                content_type = "URL/link"
+            else:
+                content_type = "text content"
+
+        usage_note = (
+            f"Use @{dependency_id} in tool parameters to access the full content"
+            if self.tool_integration_enabled
+            else (
+                "Reference @{dependency_id} directly in your response to restate "
+                "the necessary content, since tools are unavailable"
+            )
+        )
+
+        brief_description = (
+            supporting_details[:100] + "..."
+            if supporting_details and len(supporting_details) > 100
+            else supporting_details
+        )
+
+        return {
+            "action_id": dependency_id,
+            "content_type": content_type,
+            "content_length": len(primary_output) if primary_output else 0,
+            "has_content": bool(primary_output),
+            "brief_description": brief_description,
+            "usage_note": usage_note,
+        }
+
+    def _build_lightweight_prompt(
+        self,
+        plan: Plan,
+        action: Action,
+        step_number: int,
+        context_metadata: dict[str, Any],
+        requirements: str,
+        user_guidance_text: str,
+    ) -> str:
+        """Construct the lightweight context execution prompt."""
+
+        params_json = json.dumps(action.params)
+        metadata_json = json.dumps(context_metadata)
+
+        base_intro = textwrap.dedent(
+            f"""Execute step {step_number}: {action.description}
+            Overall Goal: {plan.goal}
+
+            🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
+
+            CRITICAL UNDERSTANDING:
+            - You are receiving METADATA ONLY from previous actions, NOT the actual content
+            - The "context_metadata" below contains only brief descriptions and content type information
+            - DO NOT treat the brief descriptions as the actual content - they are just summaries!
+            """
+        ).strip()
+
+        if self.tool_integration_enabled:
+            access_lines = textwrap.dedent(
+                """
+                TO ACCESS ACTUAL CONTENT:
+                - Use @action_id references in your tool parameters (e.g., "@chapter_1", "@research_data")
+                - @action_id references will automatically resolve to the FULL primary_output content
+                - This is the ONLY way to access the real content in lightweight mode
+                """
+            ).strip()
+        else:
+            access_lines = textwrap.dedent(
+                """
+                WORKING WITHOUT TOOLS:
+                - Tools are disabled, so you cannot rely on automated retrieval of dependency outputs
+                - Use the metadata to understand what content exists in previous steps
+                - When you need information, restate or summarize the relevant dependency output explicitly in your response
+                """
+            ).strip()
+
+        metadata_block = textwrap.dedent(
+            f"""
+            Context Metadata (NOT the actual content):
+            - Parameters: {params_json}
+            - Available Actions Metadata: {metadata_json}
+
+            {requirements}
+            {user_guidance_text}
+            """
+        ).strip()
+
+        if self.tool_integration_enabled:
+            reminders = textwrap.dedent(
+                """
+                IMPORTANT REMINDERS:
+                1. The metadata above shows what actions are available, but NOT their content
+                2. To use content from previous actions, reference them as @action_id in tool parameters
+                3. Example: If you need content from "research_results", use "@research_results" in your tool calls
+                4. Focus ONLY on this specific step's output - let @action_id references handle content access
+                """
+            ).strip()
+        else:
+            reminders = textwrap.dedent(
+                """
+                IMPORTANT REMINDERS:
+                1. The metadata above shows what actions are available, but NOT their content
+                2. Since tools are unavailable, reference dependency outputs manually in your response when needed
+                3. Reproduce or summarize key information from dependencies directly in primary_output
+                4. Focus ONLY on this specific step's output while ensuring the response remains self-contained
+                """
+            ).strip()
+
+        prompt_sections = [base_intro, access_lines, metadata_block, reminders]
+        return "\n\n".join(section for section in prompt_sections if section)
+
     def pipes(self) -> list[dict[str, str]]:
         return [{"id": f"{name}-pipe", "name": f"{name} Pipe"}]
 
@@ -444,7 +709,14 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
         enhanced_requirements = requirements
 
         if action.use_lightweight_context:
-            enhanced_requirements += self.valves.LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX
+            if self.tool_integration_enabled:
+                enhanced_requirements += (
+                    self.valves.LIGHTWEIGHT_CONTEXT_REQUIREMENTS_SUFFIX
+                )
+            else:
+                enhanced_requirements += (
+                    self.valves.LIGHTWEIGHT_CONTEXT_NO_TOOL_SUFFIX
+                )
         else:
             match model:
                 case self.valves.WRITER_MODEL:
@@ -452,15 +724,43 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                 case self.valves.CODER_MODEL:
                     enhanced_requirements += self.valves.CODER_REQUIREMENTS_SUFFIX
                 case _:
-                    enhanced_requirements += self.valves.ACTION_REQUIREMENTS_SUFFIX
+                    if self.tool_integration_enabled:
+                        enhanced_requirements += (
+                            self.valves.ACTION_REQUIREMENTS_SUFFIX
+                        )
+                    else:
+                        enhanced_requirements += (
+                            self.valves.ACTION_REQUIREMENTS_NO_TOOL_SUFFIX
+                        )
 
+        context_lines = [
+            f"- Step {step_number} Description: {action.description}",
+        ]
+        if self.tool_integration_enabled:
+            context_lines.append(
+                f"- Available Tools: {action.tool_ids if action.tool_ids else 'None'}"
+            )
         if action.use_lightweight_context:
-            lightweight_context = {}
+            context_lines.append(
+                "- Context Mode: LIGHTWEIGHT (only action IDs and hints provided in system prompt)"
+            )
+
+        dependencies_lines: list[str] = []
+        if action.params:
+            dependencies_lines.append(
+                f"- Parameters: {json.dumps(action.params)}"
+            )
+
+        note_lines: list[str]
+        if action.use_lightweight_context:
+            lightweight_context: dict[str, dict[str, str]] = {}
             for dep_id, dep_data in context.items():
                 if isinstance(dep_data, dict):
                     lightweight_context[dep_id] = {
                         "action_id": dep_id,
-                        "supporting_details": dep_data.get("supporting_details", ""),
+                        "supporting_details": dep_data.get(
+                            "supporting_details", ""
+                        ),
                     }
                 else:
                     lightweight_context[dep_id] = {
@@ -468,48 +768,56 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                         "supporting_details": "",
                     }
 
-            base_context = f"""
-    TASK CONTEXT:
-    - Step {step_number} Description: {action.description}
-    - Available Tools: {action.tool_ids if action.tool_ids else "None"}
-    - Context Mode: LIGHTWEIGHT (only action IDs and hints provided in system prompt)
-    
-    DEPENDENCIES AND INPUTS:
-    {f"- Parameters: {json.dumps(action.params)}" if action.params else ""}
-    - Lightweight Context (IDs and hints only): {json.dumps(lightweight_context)}
-    
-    NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints in the system prompt.
-    The actual content is not provided in the context to save space. However, @action_id references in tool parameters still work normally and will be resolved to full content.
-
-    EXECUTION REQUIREMENTS:
-    {enhanced_requirements}
-"""
+            dependencies_lines.append(
+                f"- Lightweight Context (IDs and hints only): {json.dumps(lightweight_context)}"
+            )
+            note_lines = [
+                "NOTE: You are working in lightweight context mode. Previous step results contain only action IDs and supporting_details hints.",
+            ]
+            if self.tool_integration_enabled:
+                note_lines.append(
+                    "The actual content is not provided in the context to save space. However, @action_id references in tool parameters still work normally and will be resolved to full content."
+                )
+            else:
+                note_lines.append(
+                    "The actual content is not provided in the context to save space. With tool integration disabled, rely on these hints and restate necessary details explicitly in your response."
+                )
         else:
-            base_context = f"""
-    TASK CONTEXT:
-    - Step {step_number} Description: {action.description}
-    - Available Tools: {action.tool_ids if action.tool_ids else "None"}
-    
-    DEPENDENCIES AND INPUTS:
-    {f"- Parameters: {json.dumps(action.params)}" if action.params else ""}
-    - Input from Previous Steps: {json.dumps(context)}
-    
-    NOTE: Previous step results are structured as {{"primary_output": "main_deliverable_content", "supporting_details": "additional_context"}}. 
-    You have access to both fields for context, but focus on using the "primary_output" field which contains the actual deliverable content from previous steps.
+            dependencies_lines.append(
+                f"- Input from Previous Steps: {json.dumps(context)}"
+            )
+            note_lines = [
+                'NOTE: Previous step results are structured as {"primary_output": "main_deliverable_content", "supporting_details": "additional_context"}.',
+                'You have access to both fields for context, but focus on using the "primary_output" field which contains the actual deliverable content from previous steps.',
+            ]
 
-    EXECUTION REQUIREMENTS:
-    {enhanced_requirements}
-"""
+        sections = [
+            "TASK CONTEXT:",
+            *context_lines,
+            "",
+            "DEPENDENCIES AND INPUTS:",
+            *dependencies_lines,
+            "",
+            *note_lines,
+            "",
+            "EXECUTION REQUIREMENTS:",
+            enhanced_requirements,
+        ]
 
-        match model:
-            case m if m == self.valves.WRITER_MODEL:
-                return f"SYSTEM: {self.valves.WRITER_SYSTEM_PROMPT}\n{base_context}"
+        base_context = "\n".join(sections)
 
-            case m if m == self.valves.CODER_MODEL:
-                return f"SYSTEM: {self.valves.CODER_SYSTEM_PROMPT}\n{base_context}"
+        if model == self.valves.WRITER_MODEL:
+            system_prompt = self.valves.WRITER_SYSTEM_PROMPT
+        elif model == self.valves.CODER_MODEL:
+            system_prompt = self.valves.CODER_SYSTEM_PROMPT
+        else:
+            system_prompt = (
+                self.valves.ACTION_SYSTEM_PROMPT
+                if self.tool_integration_enabled
+                else self.valves.ACTION_SYSTEM_PROMPT_NO_TOOLS
+            )
 
-            case _:  # ACTION_MODEL (default)
-                return f"SYSTEM: {self.valves.ACTION_SYSTEM_PROMPT}\n{base_context}"
+        return f"SYSTEM: {system_prompt}\n{base_context}"
 
     async def get_completion(
         self,
@@ -537,6 +845,9 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
             else prompt
         )
 
+        if not self.tool_integration_enabled:
+            tools = {}
+
         if model in [self.valves.WRITER_MODEL, self.valves.CODER_MODEL] and tools:
             __model = (
                 self.valves.ACTION_MODEL
@@ -563,9 +874,10 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                 "model": __model,
                 "messages": messages,
                 "temperature": temperature,
-                "tools": _tools,
             }
             logger.debug(f"{_tools}")
+            if _tools is not None:
+                form_data["tools"] = _tools
             if format and not tools:
                 form_data["response_format"] = format
             response: dict[str, Any] = await generate_chat_completion(
@@ -574,6 +886,8 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
                 user=self.__user__,
             )
             response_content = response["choices"][0]["message"].get("content", "")
+            if not self.tool_integration_enabled:
+                return clean_thinking_tags(response_content)
             tool_calls: list[dict[str, Any]] | None = None
             logger.debug(f"{tool_calls}")
             try:
@@ -884,120 +1198,230 @@ Remember: Metadata = what's available. @action_id = how to get the real content.
         return "\n".join(mermaid)
 
     async def create_plan(self, goal: str) -> Plan:
-        tools: list[dict[str, Any]] = [
-            {
-                "tool_id": tool.id,
-                "tool_name": tool.name,
-                "tool_description": tool.meta.description,
-            }
-            for tool in Tools.get_tools()
-        ]
+        available_tools: list[dict[str, Any]] = []
+        if self.tool_integration_enabled:
+            available_tools = [
+                {
+                    "tool_id": tool.id,
+                    "tool_name": tool.name,
+                    "tool_description": tool.meta.description,
+                }
+                for tool in Tools.get_tools()
+            ]
         """Create an execution plan for the given goal"""
-        system_prompt = f"""
-You are an expert planning agent. Your task is to create a logical and efficient execution plan to achieve a user's goal.
 
-**1. Understand the Goal**
-Break down the user's request into the necessary steps to achieve the final outcome.
+        section_idx = 1
+        plan_sections: list[str] = [
+            textwrap.dedent(
+                f"""**{section_idx}. Understand the Goal**
+                Break down the user's request into the necessary steps to achieve the final outcome."""
+            ).strip()
+        ]
+        section_idx += 1
 
-**2. Available Tools**
-Here is a list of tools you can use. Use the exact `tool_id` in the `tool_ids` field for any action that requires a tool.
-```json
-{json.dumps(tools, indent=2)}
-```
-3. Plan Structure
-- Your output must be a JSON object with a "goal" and a list of "actions". Each action must follow this schema:
-- id: A unique, descriptive identifier (e.g., "research_topic", "write_part_1").
-- type: "tool", "text", or "code". Use "tool" if the action requires external capabilities.
-- description: A clear, concise description of the action's objective.
-- tool_ids: A list of tool_ids required for this action. Mandatory for type="tool".
-- dependencies: A list of ids of actions that must complete before this one starts.
-- model: "ACTION_MODEL" for "tool", "WRITER_MODEL" for "text", "CODER_MODEL" for "code".
-- use_lightweight_context: Set to true for actions that only organize or save content by reference.
+        if self.tool_integration_enabled:
+            plan_sections.append(
+                textwrap.dedent(
+                    f"""**{section_idx}. Available Tools**
+                    Here is a list of tools you can use. Use the exact `tool_id` in the `tool_ids` field for any action that requires a tool.
+                    ```json
+                    {json.dumps(available_tools, indent=2)}
+                    ```"""
+                ).strip()
+            )
+            section_idx += 1
 
-4. Dependency and Hierarchical Planning
-- The Golden Rule of Dependency: For any task that is part of a sequence (like a chapter, a section, or a tutorial step), its dependencies array MUST INCLUDE BOTH the previous step in the sequence (for continuity) AND the foundational outline/plan (for overall consistency). This is not optional.
-- Direct Dependencies Only: An action ONLY gets context from the outputs of the actions listed in its dependencies.
-- Hierarchical Planning: Start with foundational actions (like research or an outline). Have multiple subsequent actions depend on these foundational steps.
+        if self.tool_integration_enabled:
+            plan_structure_lines = [
+                "- Your output must be a JSON object with a \"goal\" and a list of \"actions\". Each action must follow this schema:",
+                "- id: A unique, descriptive identifier (e.g., \"research_topic\", \"write_part_1\").",
+                "- type: \"tool\", \"text\", or \"code\". Use \"tool\" if the action requires external capabilities.",
+                "- description: A clear, concise description of the action's objective.",
+                "- tool_ids: A list of tool_ids required for this action. Mandatory for type=\"tool\".",
+                "- dependencies: A list of ids of actions that must complete before this one starts.",
+                "- model: \"ACTION_MODEL\" for \"tool\", \"WRITER_MODEL\" for \"text\", \"CODER_MODEL\" for \"code\".",
+                "- use_lightweight_context: Set to true for actions that only organize or save content by reference.",
+            ]
+        else:
+            plan_structure_lines = [
+                "- Your output must be a JSON object with a \"goal\" and a list of \"actions\". Each action must follow this schema:",
+                "- id: A unique, descriptive identifier (e.g., \"research_topic\", \"write_part_1\").",
+                "- type: \"text\", \"code\", or \"documentation\" as needed. Tool actions are unavailable when tool integration is disabled.",
+                "- description: A clear, concise description of the action's objective.",
+                "- tool_ids: Provide an empty array [] because external tools cannot be used.",
+                "- dependencies: A list of ids of actions that must complete before this one starts.",
+                "- model: \"WRITER_MODEL\" for text, \"CODER_MODEL\" for code, or \"ACTION_MODEL\" for reasoning steps without tools.",
+                "- use_lightweight_context: Set to true for actions that only organize or synthesize content by reference.",
+            ]
 
-5. Final Synthesis
-Mandatory final_synthesis Action: Every plan MUST conclude with an action with the id "final_synthesis".
-Purpose: This action assembles the final deliverable for the user. Its description field should be a template that uses {{action_id}} placeholders.
-Dependencies: The final_synthesis action must list all actions whose output is included in the template as dependencies.
-Example of a Hybrid Plan (Hierarchy, Sequence, and Tools):
-```json
-{{
-    "goal": "Create a 2-part technical report on LLM agents, with diagrams, and save the outputs.",
-    "actions": [
-        {{
-            "id": "research_llm_agents",
-            "type": "tool",
-            "description": "Research the architecture of modern LLM agents.",
-            "tool_ids": ["web_search"],
-            "dependencies": [],
-            "model": "ACTION_MODEL"
-        }},
-        {{
-            "id": "create_report_outline",
-            "type": "text",
-            "description": "Create a detailed outline for the 2-part report.",
-            "tool_ids": [],
-            "dependencies": ["research_llm_agents"],
-            "model": "WRITER_MODEL"
-        }},
-        {{
-            "id": "write_part_1",
-            "type": "text",
-            "description": "Write Part 1 of the report: Core Agent Components.",
-            "tool_ids": [],
-            "dependencies": ["create_report_outline"],
-            "model": "WRITER_MODEL"
-        }},
-        {{
-            "id": "create_diagram_1",
-            "type": "tool",
-            "description": "Create a diagram illustrating the agent components from Part 1.",
-            "tool_ids": ["mage_gen"],
-            "dependencies": ["write_part_1"],
-            "model": "ACTION_MODEL"
-        }},
-        {{
-            "id": "write_part_2",
-            "type": "text",
-            "description": "Write Part 2 of the report: Agent Memory and Tools, ensuring it continues from Part 1.",
-            "tool_ids": [],
-            "dependencies": ["create_report_outline", "write_part_1"],
-            "model": "WRITER_MODEL"
-        }},
-        {{
-            "id": "create_diagram_2",
-            "type": "tool",
-            "description": "Create a diagram for the memory systems described in Part 2.",
-            "tool_ids": ["image_gen"],
-            "dependencies": ["write_part_2"],
-            "model": "ACTION_MODEL"
-        }},
-        {{
-            "id": "save_all_outputs",
-            "type": "tool",
-            "description": "Save the text and diagrams for both parts into a designated folder.",
-            "tool_ids": ["save_documents"],
-            "dependencies": ["write_part_1", "create_diagram_1", "write_part_2", "create_diagram_2"],
-            "model": "ACTION_MODEL",
-            "use_lightweight_context": true
-        }},
-        {{
-            "id": "final_synthesis",
-            "type": "synthesis",
-            "description": "# Technical Report: LLM Agents\\n\\n## Part 1: Core Components\\n{{write_part_1}}\\n![Diagram 1]({{create_diagram_1}})\\n\\n## Part 2: Memory and Tools\\n{{write_part_2}}\\n![Diagram 2]({{create_diagram_2}})",
-            "tool_ids": [],
-            "dependencies": ["write_part_1", "create_diagram_1", "write_part_2", "create_diagram_2"],
-            "model": ""
-        }}
-    ]
-}}
-```
-Now, create a plan for the following goal.
-"""
+        plan_sections.append(
+            textwrap.dedent(
+                f"""**{section_idx}. Plan Structure**
+                {'\n'.join(plan_structure_lines)}"""
+            ).strip()
+        )
+        section_idx += 1
+
+        plan_sections.append(
+            textwrap.dedent(
+                f"""**{section_idx}. Dependency and Hierarchical Planning**
+                - The Golden Rule of Dependency: For any task that is part of a sequence (like a chapter, a section, or a tutorial step), its dependencies array MUST INCLUDE BOTH the previous step in the sequence (for continuity) AND the foundational outline/plan (for overall consistency). This is not optional.
+                - Direct Dependencies Only: An action ONLY gets context from the outputs of the actions listed in its dependencies.
+                - Hierarchical Planning: Start with foundational actions (like research or an outline). Have multiple subsequent actions depend on these foundational steps."""
+            ).strip()
+        )
+        section_idx += 1
+
+        plan_sections.append(
+            textwrap.dedent(
+                f"""**{section_idx}. Final Synthesis**
+                Mandatory final_synthesis Action: Every plan MUST conclude with an action with the id \"final_synthesis\".
+                Purpose: This action assembles the final deliverable for the user. Its description field should be a template that uses {{action_id}} placeholders.
+                Dependencies: The final_synthesis action must list all actions whose output is included in the template as dependencies."""
+            ).strip()
+        )
+
+        if self.tool_integration_enabled:
+            example_title = "Example of a Hybrid Plan (Hierarchy, Sequence, and Tools)"
+            example_plan = textwrap.dedent(
+                """```json
+                {
+                    "goal": "Create a 2-part technical report on LLM agents, with diagrams, and save the outputs.",
+                    "actions": [
+                        {
+                            "id": "research_llm_agents",
+                            "type": "tool",
+                            "description": "Research the architecture of modern LLM agents.",
+                            "tool_ids": ["web_search"],
+                            "dependencies": [],
+                            "model": "ACTION_MODEL"
+                        },
+                        {
+                            "id": "create_report_outline",
+                            "type": "text",
+                            "description": "Create a detailed outline for the 2-part report.",
+                            "tool_ids": [],
+                            "dependencies": ["research_llm_agents"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "write_part_1",
+                            "type": "text",
+                            "description": "Write Part 1 of the report: Core Agent Components.",
+                            "tool_ids": [],
+                            "dependencies": ["create_report_outline"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "create_diagram_1",
+                            "type": "tool",
+                            "description": "Create a diagram illustrating the agent components from Part 1.",
+                            "tool_ids": ["mage_gen"],
+                            "dependencies": ["write_part_1"],
+                            "model": "ACTION_MODEL"
+                        },
+                        {
+                            "id": "write_part_2",
+                            "type": "text",
+                            "description": "Write Part 2 of the report: Agent Memory and Tools, ensuring it continues from Part 1.",
+                            "tool_ids": [],
+                            "dependencies": ["create_report_outline", "write_part_1"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "create_diagram_2",
+                            "type": "tool",
+                            "description": "Create a diagram for the memory systems described in Part 2.",
+                            "tool_ids": ["image_gen"],
+                            "dependencies": ["write_part_2"],
+                            "model": "ACTION_MODEL"
+                        },
+                        {
+                            "id": "final_synthesis",
+                            "type": "text",
+                            "description": "# Technical Report: LLM Agents\\n\\n## Part 1: Core Components\\n{{write_part_1}}\\n![Diagram 1]({{create_diagram_1}})\\n\\n## Part 2: Memory and Tools\\n{{write_part_2}}\\n![Diagram 2]({{create_diagram_2}})",
+                            "tool_ids": [],
+                            "dependencies": [
+                                "create_report_outline",
+                                "write_part_1",
+                                "create_diagram_1",
+                                "write_part_2",
+                                "create_diagram_2"
+                            ],
+                            "model": "WRITER_MODEL"
+                        }
+                    ]
+                }
+                ```"""
+            ).strip()
+        else:
+            example_title = "Example of a Structured Plan (No Tool Usage)"
+            example_plan = textwrap.dedent(
+                """```json
+                {
+                    "goal": "Create a 2-part technical report on LLM agents and summarize key insights.",
+                    "actions": [
+                        {
+                            "id": "research_llm_agents",
+                            "type": "text",
+                            "description": "Summarize the architecture of modern LLM agents using existing knowledge.",
+                            "tool_ids": [],
+                            "dependencies": [],
+                            "model": "ACTION_MODEL"
+                        },
+                        {
+                            "id": "create_report_outline",
+                            "type": "text",
+                            "description": "Create a detailed outline for the 2-part report.",
+                            "tool_ids": [],
+                            "dependencies": ["research_llm_agents"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "write_part_1",
+                            "type": "text",
+                            "description": "Write Part 1 of the report: Core Agent Components.",
+                            "tool_ids": [],
+                            "dependencies": ["create_report_outline"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "write_part_2",
+                            "type": "text",
+                            "description": "Write Part 2 of the report: Memory strategies and orchestration.",
+                            "tool_ids": [],
+                            "dependencies": ["create_report_outline", "write_part_1"],
+                            "model": "WRITER_MODEL"
+                        },
+                        {
+                            "id": "final_synthesis",
+                            "type": "text",
+                            "description": "# Technical Report: LLM Agents\\n\\n## Part 1: Core Components\\n{{write_part_1}}\\n\\n## Part 2: Memory Strategies\\n{{write_part_2}}",
+                            "tool_ids": [],
+                            "dependencies": [
+                                "create_report_outline",
+                                "write_part_1",
+                                "write_part_2"
+                            ],
+                            "model": "WRITER_MODEL"
+                        }
+                    ]
+                }
+                ```"""
+            ).strip()
+
+        plan_sections_text = "\n\n".join(plan_sections)
+
+        system_prompt = textwrap.dedent(
+            f"""You are an expert planning agent. Your task is to create a logical and efficient execution plan to achieve a user's goal.
+
+            {plan_sections_text}
+
+            {example_title}:
+            {example_plan}
+            """
+        ).strip()
+
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": goal},
@@ -1210,15 +1634,16 @@ Now, create a plan for the following goal.
                         ]
                         raise ValueError(msg)
 
-                try:
-                    await self.validate_and_fix_tool_actions(plan)
-                except Exception as validation_error:
-                    await self.emit_status(
-                        "warning",
-                        f"Tool validation failed but continuing with plan: {str(validation_error)}",
-                        False,
-                    )
-                    logger.warning(f"Tool validation error: {validation_error}")
+                if self.tool_integration_enabled:
+                    try:
+                        await self.validate_and_fix_tool_actions(plan)
+                    except Exception as validation_error:
+                        await self.emit_status(
+                            "warning",
+                            f"Tool validation failed but continuing with plan: {str(validation_error)}",
+                            False,
+                        )
+                        logger.warning(f"Tool validation error: {validation_error}")
 
                 try:
                     await self.validate_and_enhance_template(plan)
@@ -1264,23 +1689,57 @@ Now, create a plan for the following goal.
         )
         has_dependencies = bool(action.dependencies)
 
-        requirements_prompt = f"""
-You are an expert requirements generator for a generalist agent that can use a variety of tools, not just code. Focus on the following action:
-Action Description: {action.description}
-Parameters: {json.dumps(action.params)}
-Tool(s) to use: {action.tool_ids if action.tool_ids else "None"}
-Dependencies: {dependencies_str if has_dependencies else "None"}
+        prompt_lines = [
+            "You are an expert requirements generator for a generalist agent.",
+            "Focus on the following action:",
+            f"Action Description: {action.description}",
+            f"Parameters: {json.dumps(action.params)}",
+        ]
 
-Instructions:
-- Generate a concise, numbered list of requirements to ensure this action is performed correctly.
-- If a tool is specified, requirements should focus on correct and effective tool usage.
-- Only require code/scripts if the user explicitly requested it; otherwise, prefer tool or text/documentation outputs.
-- For actions with dependencies, clearly state how outputs from dependencies should be used.
-- For text/documentation actions, be specific and actionable.
-- For code actions (if requested), ensure code is complete, runnable, and all variables are defined.
+        if self.tool_integration_enabled:
+            prompt_lines.append(
+                f"Tool(s) to use: {action.tool_ids if action.tool_ids else 'None'}"
+            )
+        else:
+            prompt_lines.append(
+                "Tool integration is disabled: complete the action using only the provided context and dependencies."
+            )
 
-Return ONLY a numbered list of requirements. Do not include explanations or extra text.
-"""
+        prompt_lines.append(
+            f"Dependencies: {dependencies_str if has_dependencies else 'None'}"
+        )
+        prompt_lines.append("")
+        prompt_lines.append("Instructions:")
+
+        instruction_lines = [
+            "- Generate a concise, numbered list of requirements to ensure this action is performed correctly.",
+            "- Only require code/scripts if the user explicitly requested it; otherwise, prefer text/documentation outputs.",
+            "- For actions with dependencies, clearly state how outputs from dependencies should be used.",
+            "- For text/documentation actions, be specific and actionable.",
+            "- For code actions (if requested), ensure code is complete, runnable, and all variables are defined.",
+        ]
+
+        if self.tool_integration_enabled:
+            instruction_lines.insert(
+                1,
+                "- If a tool is specified, requirements should focus on correct and effective tool usage.",
+            )
+        else:
+            instruction_lines.insert(
+                1,
+                "- Do not reference external tool usage; rely on reasoning and provided context to fulfil the action.",
+            )
+
+        prompt_lines.extend(instruction_lines)
+        prompt_lines.extend(
+            [
+                "",
+                "Return ONLY a numbered list of requirements. Do not include explanations or extra text.",
+            ]
+        )
+
+        requirements_prompt = "\n".join(prompt_lines)
+
         enhanced_requirements = await self.get_completion(
             prompt=requirements_prompt,
             temperature=self.valves.ACTION_TEMPERATURE,
@@ -1291,6 +1750,14 @@ Return ONLY a numbered list of requirements. Do not include explanations or extr
 
     async def validate_and_fix_tool_actions(self, plan: Plan):
         """Check for tool actions missing tool_ids and automatically populate them."""
+        if not self.tool_integration_enabled:
+            await self.emit_status(
+                "info",
+                "Tool integration disabled; skipping automatic tool validation.",
+                False,
+            )
+            return
+
         await self.emit_status(
             "info", "Starting tool validation for plan actions...", False
         )
@@ -1596,6 +2063,14 @@ Return ONLY the enhanced template description. Do not include explanations, comm
 
     async def validate_and_flag_lightweight_context(self, plan: Plan):
         """Analyze the plan and flag appropriate actions for lightweight context mode using LLM categorization."""
+        if not self.tool_integration_enabled:
+            await self.emit_status(
+                "info",
+                "Tool integration disabled; skipping lightweight context optimization.",
+                False,
+            )
+            return
+
         await self.emit_status(
             "info", "Analyzing plan for lightweight context optimization...", False
         )
@@ -1773,52 +2248,10 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             return parent_results
 
         if action.use_lightweight_context:
-
-            context_for_prompt = {}
-            for dep in action.dependencies:
-                if dep in context:
-                    dep_result = context.get(dep, {})
-                    primary_output = dep_result.get("primary_output", "")
-                    supporting_details = dep_result.get("supporting_details", "")
-                    
-                    content_type = "unknown"
-                    if primary_output:
-                        if primary_output.startswith("#"):
-                            content_type = "markdown document"
-                        elif primary_output.startswith("```"):
-                            content_type = "code"
-                        elif "http" in primary_output and (
-                            "jpg" in primary_output
-                            or "png" in primary_output
-                            or "gif" in primary_output
-                        ):
-                            content_type = "image URL"
-                        elif primary_output.startswith("http"):
-                            content_type = "URL/link"
-                        else:
-                            content_type = "text content"
-
-                    context_for_prompt[dep] = {
-                        "action_id": dep,
-                        "content_type": content_type,
-                        "content_length": len(primary_output) if primary_output else 0,
-                        "has_content": bool(primary_output),
-                        "brief_description": (
-                            supporting_details[:100] + "..."
-                            if len(supporting_details) > 100
-                            else supporting_details
-                        ),
-                        "usage_note": f"Use @{dep} in tool parameters to access the full content",
-                    }
-                else:
-                    context_for_prompt[dep] = {
-                        "action_id": dep,
-                        "content_type": "unknown",
-                        "content_length": 0,
-                        "has_content": False,
-                        "brief_description": "",
-                        "usage_note": f"Use @{dep} in tool parameters to access the full content",
-                    }
+            context_for_prompt = {
+                dep: self._format_dependency_metadata(dep, context.get(dep))
+                for dep in action.dependencies
+            }
         else:
             context_for_prompt = context
 
@@ -1839,35 +2272,14 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             """
 
         if action.use_lightweight_context:
-            base_prompt = f"""
-Execute step {step_number}: {action.description}
-Overall Goal: {plan.goal}
-
-🔍 LIGHTWEIGHT CONTEXT MODE ACTIVE 🔍
-
-CRITICAL UNDERSTANDING:
-- You are receiving METADATA ONLY from previous actions, NOT the actual content
-- The "context_metadata" below contains only brief descriptions and content type information
-- DO NOT treat the brief descriptions as the actual content - they are just summaries!
-
-TO ACCESS ACTUAL CONTENT:
-- Use @action_id references in your tool parameters (e.g., "@chapter_1", "@research_data")
-- @action_id references will automatically resolve to the FULL primary_output content
-- This is the ONLY way to access the real content in lightweight mode
-
-Context Metadata (NOT the actual content):
-- Parameters: {json.dumps(action.params)}
-- Available Actions Metadata: {json.dumps(context_for_prompt)}
-
-{requirements}
-{user_guidance_text}
-
-IMPORTANT REMINDERS:
-1. The metadata above shows what actions are available, but NOT their content
-2. To use content from previous actions, reference them as @action_id in tool parameters
-3. Example: If you need content from "research_results", use "@research_results" in your tool calls
-4. Focus ONLY on this specific step's output - let @action_id references handle content access
-"""
+            base_prompt = self._build_lightweight_prompt(
+                plan,
+                action,
+                step_number,
+                context_for_prompt,
+                requirements,
+                user_guidance_text,
+            )
         else:
             base_prompt = f"""
 Execute step {step_number}: {action.description}
@@ -1904,19 +2316,20 @@ Focus ONLY on this specific step's output.
 
                 if current_attempt > 0 and best_reflection:
                     retry_guidance = ""
-                    if action.tool_ids and not action.tool_calls:
-                        retry_guidance += f"""
-                        
-                        IMPORTANT: You have access to these tools: {action.tool_ids}
-                        Your previous attempt did not use any tools, which may be why it failed.
-                        Consider using the appropriate tools to complete this task effectively.
-                        """
-                    elif action.tool_ids and action.tool_calls:
-                        retry_guidance += f"""
-                        
-                        Your previous attempt used tools: {action.tool_calls}
-                        But the output was still inadequate. Try different approaches or parameters.
-                        """
+                    if self.tool_integration_enabled:
+                        if action.tool_ids and not action.tool_calls:
+                            retry_guidance += f"""
+
+                            IMPORTANT: You have access to these tools: {action.tool_ids}
+                            Your previous attempt did not use any tools, which may be why it failed.
+                            Consider using the appropriate tools to complete this task effectively.
+                            """
+                        elif action.tool_ids and action.tool_calls:
+                            retry_guidance += f"""
+
+                            Your previous attempt used tools: {action.tool_calls}
+                            But the output was still inadequate. Try different approaches or parameters.
+                            """
 
                     base_prompt += f"""
                         
@@ -1932,18 +2345,20 @@ Focus ONLY on this specific step's output.
                         """
 
                 try:
-                    extra_params: dict[str, Any] = {
-                        "__event_emitter__": self.__current_event_emitter__,
-                        "__user__": self.user,
-                        "__request__": self.__request__,
-                    }
+                    tools: dict[str, dict[Any, Any]] = {}
+                    if self.tool_integration_enabled and action.tool_ids:
+                        extra_params: dict[str, Any] = {
+                            "__event_emitter__": self.__current_event_emitter__,
+                            "__user__": self.user,
+                            "__request__": self.__request__,
+                        }
 
-                    tools: dict[str, dict[Any, Any]] = await get_tools(  # type: ignore
-                        self.__request__,
-                        action.tool_ids or [],
-                        self.__user__,
-                        extra_params,
-                    )
+                        tools = await get_tools(  # type: ignore
+                            self.__request__,
+                            action.tool_ids,
+                            self.__user__,
+                            extra_params,
+                        )
 
                     execution_model = (
                         action.model
@@ -2184,80 +2599,175 @@ Focus ONLY on this specific step's output.
             for tool, result in action.tool_results.items()
         }
 
-        analysis_prompt = f"""
-You are an expert evaluator for a generalist agent that can use a variety of tools, not just code. Analyze the output of an action based on the project goal, the action's description, and the tools used.
+        header_lines = [
+            "You are an expert evaluator for a generalist agent.",
+            "Analyze the output of an action based on the project goal and the action's description.",
+            "",
+            f"Overall Goal: {plan.goal}",
+            f"Action Description: {action.description}",
+        ]
 
-Overall Goal: {plan.goal}
-Action Description: {action.description}
-Expected Tool(s): {expected_tools}
-Actually Called Tool(s): {actual_tool_calls}
-Tool Results Summary: {json.dumps(tool_results_summary, indent=2)}
+        if self.tool_integration_enabled:
+            header_lines.extend(
+                [
+                    f"Expected Tool(s): {expected_tools}",
+                    f"Actually Called Tool(s): {actual_tool_calls}",
+                    f"Tool Results Summary: {json.dumps(tool_results_summary, indent=2)}",
+                    "",
+                ]
+            )
+        else:
+            header_lines.extend(
+                [
+                    "Tool integration is disabled for this evaluation; assess the output solely on the provided context and content.",
+                    "",
+                ]
+            )
 
-Action Output to Analyze:
----
-{output}
----
+        header_lines.extend(
+            [
+                "Action Output to Analyze:",
+                "---",
+                output,
+                "---",
+                "",
+                "CRITICAL FIELD USAGE VERIFICATION - AUTOMATIC FAILURE CONDITIONS:",
+                "- PRIMARY_OUTPUT must contain the MAIN DELIVERABLE content (the actual result users need)",
+                "- SUPPORTING_DETAILS must contain only ADDITIONAL CONTEXT, metadata, or explanatory information",
+                "- If the main content/deliverable is in supporting_details instead of primary_output: AUTOMATIC quality_score = 0.1",
+                "- If primary_output contains only brief summaries while actual content is in supporting_details: AUTOMATIC quality_score = 0.1",
+                '- If primary_output is empty or just says "See supporting details": AUTOMATIC quality_score = 0.1',
+                "",
+            ]
+        )
 
-CRITICAL FIELD USAGE VERIFICATION - AUTOMATIC FAILURE CONDITIONS:
-- PRIMARY_OUTPUT must contain the MAIN DELIVERABLE content (the actual result users need)
-- SUPPORTING_DETAILS must contain only ADDITIONAL CONTEXT, metadata, or explanatory information
-- If the main content/deliverable is in supporting_details instead of primary_output: AUTOMATIC quality_score = 0.1
-- If primary_output contains only brief summaries while actual content is in supporting_details: AUTOMATIC quality_score = 0.1
-- If primary_output is empty or just says "See supporting details": AUTOMATIC quality_score = 0.1
+        if self.tool_integration_enabled:
+            header_lines.extend(
+                [
+                    "CRITICAL TOOL VERIFICATION:",
+                    f"- If the action was expected to use tools ({expected_tools}) but no tools were called ({actual_tool_calls}), this is a MAJOR failure",
+                    "- If tools were called, verify that the output actually incorporates their results meaningfully",
+                    "- If the output claims tools were used but no actual tool calls occurred, this is FALSE and should be heavily penalized",
+                    "- Tool results should be properly processed and integrated into the final output",
+                    "",
+                ]
+            )
 
-CRITICAL TOOL VERIFICATION:
-- If the action was expected to use tools ({expected_tools}) but no tools were called ({actual_tool_calls}), this is a MAJOR failure
-- If tools were called, verify that the output actually incorporates their results meaningfully
-- If the output claims tools were used but no actual tool calls occurred, this is FALSE and should be heavily penalized
-- Tool results should be properly processed and integrated into the final output
+        instructions_points = [
+            '**FIELD CORRECTNESS (CRITICAL)**: The primary_output field MUST contain the main deliverable content. Supporting_details MUST only contain auxiliary information. Content in wrong fields = AUTOMATIC FAILURE',
+            '**Output Format**: The output should be a valid JSON object with "primary_output" and "supporting_details" fields',
+            "**Completeness**: Does the output fully address the action's description and requirements?",
+            "**Correctness**: Is the information or code (if present) accurate and functional?",
+            "**Relevance**: Does the output directly contribute to the overall goal?",
+            "**Content Quality**: Is the primary_output field clean, complete, and ready for use by subsequent steps?",
+            "**Markdown integration**: Markdown format for deliverables is preferable, e.g., ![caption](<image uri>) to show image or embeddable content.",
+            "**Missing hyperlinks in primary_output**: When the deliverable is a hyperlink or attachment, ensure it appears in primary_output (e.g., generated images must include their URI in primary_output).",
+        ]
 
-Instructions:
-Critically evaluate the output based on the following criteria:
-1. **FIELD CORRECTNESS (CRITICAL)**: The primary_output field MUST contain the main deliverable content. Supporting_details MUST only contain auxiliary information. Content in wrong fields = AUTOMATIC FAILURE
-2. **Tool Usage Verification**: STRICTLY verify that claimed tool usage matches actual tool calls. False claims about tool usage should result in quality_score <= 0.3
-3. **Output Format**: The output should be a valid JSON object with "primary_output" and "supporting_details" fields
-4. **Completeness**: Does the output fully address the action's description and requirements?
-5. **Correctness**: Is the information, tool usage, or code (if present) accurate and functional?
-6. **Relevance**: Does the output directly contribute to the overall goal?
-7. **Tool Integration**: If tools were used, are their results properly integrated and processed in the output?
-8. **Content Quality**: Is the primary_output field clean, complete, and ready for use by subsequent steps?
-9. **Markdown integration**: Markdown format for deliverables is preferable using the embeding formats for example ![caption](<image uri>) to show image or embedable content.
-10.**Missing Tool Calls**: if tool calls werent done Ask the model to call them but do not mention Format at this step.
-11.**Missing hyperlinks in primary output**: in cases qehre the main deliverable is in the form of an hyperlink it MUST be on priparyoputput. for example for generated images , the actual uri or markdown attachement must be in the correct place.
-12. *tool resukts**: tool results are LOST if they are not explicitly attached to the primary output, any hyperlink , generated image or content wich its uri is not placed in primary output and instead leaved in the tool reuslts, is categorically lost forever.
+        if self.tool_integration_enabled:
+            instructions_points.insert(
+                1,
+                "**Tool Usage Verification**: STRICTLY verify that claimed tool usage matches actual tool calls. False claims about tool usage should result in quality_score <= 0.3",
+            )
+            instructions_points.insert(
+                6,
+                "**Tool Integration**: If tools were used, ensure their results are properly integrated and processed in the output.",
+            )
+            instructions_points.append(
+                "**Missing Tool Calls**: If required tools were not called, ask the model to call them (do not mention format at this step).",
+            )
+            instructions_points.append(
+                "**Tool Results Placement**: Tool outputs are lost if not surfaced in primary_output. Ensure any generated assets or URLs are explicitly included there.",
+            )
+        else:
+            instructions_points.append(
+                "**Self-Containment**: Ensure all critical content is present in primary_output; do not rely on unavailable external tools or implicit context.",
+            )
 
-EXAMPLES OF CORRECT vs INCORRECT FIELD USAGE:
+        instructions_block = "\n".join(
+            f"{idx}. {point}" for idx, point in enumerate(instructions_points, start=1)
+        )
 
-✅ CORRECT:
-{{"primary_output": "# AI News Report\\n\\nGoogle's Gemini Advancements...", "supporting_details": "Source: TechCrunch. Search performed at 10:30 AM."}}
+        examples_block = textwrap.dedent("""
+            EXAMPLES OF CORRECT vs INCORRECT FIELD USAGE:
 
-❌ INCORRECT (AUTOMATIC FAIL):
-{{"primary_output": "AI News Report", "supporting_details": "# AI News Report\\n\\nGoogle's Gemini Advancements..."}}
+            ✅ CORRECT:
+            {"primary_output": "# AI News Report
 
-❌ INCORRECT (AUTOMATIC FAIL):
-{{"primary_output": "See supporting details", "supporting_details": "# AI News Report\\n\\nGoogle's Gemini Advancements..."}}
+Google's Gemini Advancements...", "supporting_details": "Source: TechCrunch. Search performed at 10:30 AM."}
 
-❌ INCORRECT (AUTOMATIC FAIL):
-{{"primary_output": "Summary: AI news compiled", "supporting_details": "# AI News Report\\n\\nGoogle's Gemini Advancements..."}}
+            ❌ INCORRECT (AUTOMATIC FAIL):
+            {"primary_output": "AI News Report", "supporting_details": "# AI News Report
 
-Remember: PRIMARY_OUTPUT = Main content that users need. SUPPORTING_DETAILS = Extra context only.
-Your response MUST be a single, valid JSON object with the following structure. Do not add any text before or after the JSON object.
-{{
-    "is_successful": <boolean>,
-    "quality_score": <float, 0.0-1.0>,
-    "issues": ["<A list of specific, concise issues found in the output>"],
-    "suggestions": ["<A list of actionable suggestions to fix the issues>"]
-}}
+Google's Gemini Advancements..."}
 
-Scoring Guide:
-- 0.9-1.0: Perfect, properly structured, tools used correctly, no issues
-- 0.7-0.89: Minor issues, but mostly correct and usable
-- 0.5-0.69: Significant issues that prevent the output from being used as-is
-- 0.3-0.49: Major problems, incorrect tool usage claims, or incomplete execution
-- 0.0-0.29: Severely flawed, false tool claims, or completely incorrect
+            ❌ INCORRECT (AUTOMATIC FAIL):
+            {"primary_output": "See supporting details", "supporting_details": "# AI News Report
 
-Be brutally honest. A high `quality_score` should only be given to high-quality outputs that properly use tools when expected and follow the correct format.
-"""
+Google's Gemini Advancements..."}
+
+            ❌ INCORRECT (AUTOMATIC FAIL):
+            {"primary_output": "Summary: AI news compiled", "supporting_details": "# AI News Report
+
+Google's Gemini Advancements..."}
+
+            Remember: PRIMARY_OUTPUT = Main content that users need. SUPPORTING_DETAILS = Extra context only.
+        """).strip()
+
+        response_schema_block = textwrap.dedent("""
+            Your response MUST be a single, valid JSON object with the following structure. Do not add any text before or after the JSON object.
+            {
+                "is_successful": <boolean>,
+                "quality_score": <float, 0.0-1.0>,
+                "issues": ["<A list of specific, concise issues found in the output>"],
+                "suggestions": ["<A list of actionable suggestions to fix the issues>"]
+            }
+        """).strip()
+
+        scoring_lines = [
+            "- 0.9-1.0: Perfect, properly structured, no issues",
+            "- 0.7-0.89: Minor issues, but mostly correct and usable",
+            "- 0.5-0.69: Significant issues that prevent the output from being used as-is",
+            "- 0.3-0.49: Major problems or incomplete execution",
+            "- 0.0-0.29: Severely flawed or completely incorrect",
+        ]
+
+        if self.tool_integration_enabled:
+            scoring_lines[0] = (
+                "- 0.9-1.0: Perfect, properly structured, tools used correctly, no issues"
+            )
+            scoring_lines[3] = (
+                "- 0.3-0.49: Major problems, incorrect tool usage claims, or incomplete execution"
+            )
+            scoring_lines[4] = (
+                "- 0.0-0.29: Severely flawed, false tool claims, or completely incorrect"
+            )
+
+        scoring_block = "\n".join(scoring_lines)
+
+        closing_line = (
+            "Be brutally honest. A high `quality_score` should only be given to high-quality outputs that properly use tools when expected and follow the correct format."
+            if self.tool_integration_enabled
+            else "Be brutally honest. A high `quality_score` should only be given to high-quality outputs that follow the correct format and fully address the action."
+        )
+
+        analysis_prompt = "\n".join(
+            header_lines
+            + [
+                "Instructions:",
+                "Critically evaluate the output based on the following criteria:",
+                instructions_block,
+                "",
+                examples_block,
+                "",
+                response_schema_block,
+                "",
+                "Scoring Guide:",
+                scoring_block,
+                "",
+                closing_line,
+            ]
+        )
 
         # Retry loop for analysis
         attempts_remaining = self.valves.MAX_RETRIES
@@ -2999,3 +3509,85 @@ Be brutally honest. A high `quality_score` should only be given to high-quality 
         await self.emit_status("success", "Plan execution completed.", True)
 
         return result
+
+
+if __name__ == "__main__":  # pragma: no cover - manual regression checks
+    import unittest
+    from unittest.mock import AsyncMock
+
+    class NoToolModeTests(unittest.TestCase):
+        def setUp(self) -> None:
+            self.pipe = Pipe()
+            self.pipe.valves.ENABLE_TOOL_INTEGRATION = False
+            self.pipe.valves.ACTION_MODEL = "action-model"
+            self.pipe.valves.WRITER_MODEL = "writer-model"
+            self.pipe.valves.CODER_MODEL = "coder-model"
+
+        def test_dependency_metadata_omits_tool_language(self) -> None:
+            metadata = self.pipe._format_dependency_metadata(
+                "research", {"primary_output": "# Heading", "supporting_details": "details"}
+            )
+            self.assertNotIn("tool parameters", metadata["usage_note"].lower())
+
+        def test_lightweight_prompt_without_tool_references(self) -> None:
+            plan = Plan(goal="Achieve goal", actions=[])
+            action = Action(
+                id="step1",
+                type="text",
+                description="Summarize findings",
+                dependencies=["research"],
+            )
+            context_metadata = {
+                "research": self.pipe._format_dependency_metadata("research", None)
+            }
+            prompt = self.pipe._build_lightweight_prompt(
+                plan,
+                action,
+                1,
+                context_metadata,
+                "Requirements block",
+                "",
+            )
+            prompt_lower = prompt.lower()
+            self.assertNotIn("tool parameters", prompt_lower)
+            self.assertNotIn("tool calls", prompt_lower)
+
+        def test_system_prompt_switches_without_tool_support(self) -> None:
+            action = Action(
+                id="step1",
+                type="text",
+                description="Do something",
+                model="",
+            )
+            system_prompt = self.pipe.get_system_prompt_for_model(
+                action,
+                step_number=1,
+                context={},
+                requirements="Requirements",
+                model=self.pipe.valves.ACTION_MODEL,
+            )
+            self.assertIn(self.pipe.valves.ACTION_SYSTEM_PROMPT_NO_TOOLS, system_prompt)
+
+        def test_lightweight_validation_skips_without_tools(self) -> None:
+            plan = Plan(
+                goal="Goal",
+                actions=[
+                    Action(
+                        id="a1",
+                        type="text",
+                        description="Organize files",
+                        dependencies=["d1", "d2"],
+                    )
+                ],
+            )
+            self.pipe.valves.ENABLE_LIGHTWEIGHT_CONTEXT_OPTIMIZATION = True
+            self.pipe.emit_status = AsyncMock()
+            self.pipe.get_completion = AsyncMock(
+                side_effect=AssertionError("get_completion should not be called")
+            )
+
+            asyncio.run(self.pipe.validate_and_flag_lightweight_context(plan))
+
+            self.pipe.get_completion.assert_not_called()
+
+    unittest.main()
