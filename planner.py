@@ -1254,10 +1254,11 @@ WORKING GUIDELINES:
                 "- use_lightweight_context: Set to true for actions that only organize or synthesize content by reference.",
             ]
 
+        plan_structure_body = "\n".join(plan_structure_lines)
         plan_sections.append(
             textwrap.dedent(
                 f"""**{section_idx}. Plan Structure**
-                {'\n'.join(plan_structure_lines)}"""
+{plan_structure_body}"""
             ).strip()
         )
         section_idx += 1
