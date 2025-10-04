@@ -17,7 +17,6 @@ class PipeForPlanStructureTest(Pipe):
     async def get_completion(  # type: ignore[override]
         self,
         prompt,
-        temperature: float = 0.7,
         model: str | dict[str, object] = "",
         tools: dict[str, dict[object, object]] | None = None,
         format: dict[str, object] | None = None,

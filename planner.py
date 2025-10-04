@@ -531,26 +531,10 @@ WORKING GUIDELINES:
             default=True,
             description="Show detailed summaries for completed actions in dropdown format",
         )
-        ACTION_TEMPERATURE: float = Field(
-            default=0.7,
-            description="Temperature setting for the ACTION_MODEL (tool-using actions)",
-        )
-        WRITER_TEMPERATURE: float = Field(
-            default=0.9,
-            description="Temperature setting for the WRITER_MODEL (creative text generation)",
-        )
-        CODER_TEMPERATURE: float = Field(
-            default=0.3,
-            description="Temperature setting for the CODER_MODEL (code generation)",
-        )
-        PLANNING_TEMPERATURE: float = Field(
-            default=0.8,
-            description="Temperature setting for planning phase",
-        )
-        ANALYSIS_TEMPERATURE: float = Field(
-            default=0.4,
-            description="Temperature setting for output analysis and reflection",
-        )
+        # Temperature settings removed intentionally because temperature parameter
+        # is not supported by the current ChatGPT-5 backend. Keeping any
+        # configuration field here would imply support for the parameter and could
+        # lead to confusion when the planner attempts to pass it to the LLM.
 
     def __init__(self):
         self.type = "manifold"
@@ -824,7 +808,6 @@ WORKING GUIDELINES:
     async def get_completion(
         self,
         prompt: str | list[dict[str, Any]],
-        temperature: float = 0.7,
         model: str | dict[str, Any] = "",
         tools: dict[str, dict[Any, Any]] = {},
         format: dict[str, Any] | None = None,
@@ -875,7 +858,6 @@ WORKING GUIDELINES:
             form_data: dict[str, Any] = {
                 "model": __model,
                 "messages": messages,
-                "temperature": temperature,
             }
             logger.debug(f"{_tools}")
             if _tools is not None:
@@ -1108,7 +1090,6 @@ WORKING GUIDELINES:
             if model in [self.valves.WRITER_MODEL, self.valves.CODER_MODEL]:
                 specialist_response = await self.get_completion(
                     prompt=messages,
-                    temperature=temperature,
                     model=model,
                     action_results=action_results,
                     format=format,
@@ -1141,7 +1122,6 @@ WORKING GUIDELINES:
                             If tools produce files, images, or URLs, include them properly formatted in "primary_output" """
                 tool_response = await self.get_completion(
                     prompt=messages,
-                    temperature=temperature,
                     model=model,
                     tools=tools,
                     action_results=action_results,
@@ -1481,7 +1461,6 @@ WORKING GUIDELINES:
 
                 result = await self.get_completion(
                     prompt=messages,
-                    temperature=self.valves.PLANNING_TEMPERATURE,
                     format=plan_format,
                     action_results={},
                     action=None,
@@ -1745,7 +1724,6 @@ WORKING GUIDELINES:
 
         enhanced_requirements = await self.get_completion(
             prompt=requirements_prompt,
-            temperature=self.valves.ACTION_TEMPERATURE,
             action_results={},
             action=None,
         )
@@ -1843,7 +1821,6 @@ If no suitable tools are found, return an empty array: []
 
                 result = await self.get_completion(
                     prompt=tool_selection_prompt,
-                    temperature=self.valves.ACTION_TEMPERATURE,
                     model="",
                     format=tool_format,
                     action_results={},
@@ -2039,7 +2016,6 @@ Return ONLY the enhanced template description. Do not include explanations, comm
         try:
             enhanced_template = await self.get_completion(
                 prompt=template_enhancement_prompt,
-                temperature=self.valves.PLANNING_TEMPERATURE,
                 action_results={},
                 action=None,
             )
@@ -2189,7 +2165,6 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             try:
                 categorization_result = await self.get_completion(
                     prompt=categorization_prompt,
-                    temperature=0.1,
                     action_results={},
                     action=None,
                 )
@@ -2394,19 +2369,11 @@ Focus ONLY on this specific step's output.
                         },
                     }
 
-                    if execution_model == self.valves.WRITER_MODEL:
-                        model_temperature = self.valves.WRITER_TEMPERATURE
-                    elif execution_model == self.valves.CODER_MODEL:
-                        model_temperature = self.valves.CODER_TEMPERATURE
-                    else:
-                        model_temperature = self.valves.ACTION_TEMPERATURE
-
                     response = await self.get_completion(
                         prompt=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": base_prompt},
                         ],
-                        temperature=model_temperature,
                         model=execution_model,
                         tools=tools,
                         format=action_format,
@@ -2813,7 +2780,6 @@ Google's Gemini Advancements..."}
 
                 analysis_response = await self.get_completion(
                     prompt=analysis_prompt,
-                    temperature=self.valves.ANALYSIS_TEMPERATURE,
                     format=reflection_format,
                     action_results={},
                     action=None,

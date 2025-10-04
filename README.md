@@ -36,13 +36,7 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 - `WRITER_MODEL`: Creative writing and documentation
 - `CODER_MODEL`: Code generation and development
 
-**Temperature Controls:**
-
-- `PLANNING_TEMPERATURE` (0.8): Planning creativity
-- `ACTION_TEMPERATURE` (0.7): Tool execution precision
-- `WRITER_TEMPERATURE` (0.9): Creative writing freedom
-- `CODER_TEMPERATURE` (0.3): Code generation accuracy
-- `ANALYSIS_TEMPERATURE` (0.4): Output analysis precision
+**Temperature Controls:** Disabled. The ChatGPT-5 backend used by this planner no longer accepts a `temperature` parameter, so all related configuration knobs have been removed to prevent unsupported settings from being surfaced.
 
 **Execution Settings:**
 
