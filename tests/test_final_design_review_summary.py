@@ -62,11 +62,39 @@ def test_final_review_appends_global_summary() -> None:
 
     assert primary_output.startswith(assembled_output)
     assert "## Synthèse globale de la design review" in primary_output
-    assert "Analyse initiale" in primary_output
-    assert "Prototype fonctionnel" in primary_output
-    assert "Planifier une session de relecture croisée." in primary_output
-    first_step_index = primary_output.index("### Étape 1 · Analyse initiale")
-    second_step_index = primary_output.index("### Étape 2 · Prototype fonctionnel")
-    assert first_step_index < second_step_index
-    inter_steps = primary_output[first_step_index:second_step_index]
-    assert "\n---\n" in inter_steps
+
+    global_section = primary_output.split("## Synthèse globale de la design review", maxsplit=1)[
+        1
+    ]
+
+    assert "Section 1 : Résumé rapide" in global_section
+    section1_content = global_section.split("Section 2 :", maxsplit=1)[0]
+    resume_lines = [
+        line
+        for line in section1_content.splitlines()
+        if line.strip().startswith("- ")
+    ]
+    assert 1 <= len(resume_lines) <= 6
+
+    table_header = "| Étape | Points forts | Axes d'amélioration |"
+    assert table_header in global_section
+
+    table_rows = [
+        line for line in global_section.splitlines() if line.startswith("| Étape") and "Points" not in line
+    ]
+    assert table_rows, "La table doit contenir au moins une ligne d'étape."
+
+    for row in table_rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        assert len(cells) == 3
+        step_label = cells[0]
+        assert step_label.startswith("Étape ")
+        assert "–" in step_label
+        summary_words = step_label.split("–", maxsplit=1)[1].strip().split()
+        assert 3 <= len(summary_words) <= 4
+
+    assert "Section 3 : Prochaines étapes prioritaires" in global_section
+    next_steps_lines = [
+        line for line in global_section.splitlines() if line.strip().startswith("- Étape")
+    ]
+    assert next_steps_lines, "Les prochaines étapes doivent être listées sous forme de puces."
