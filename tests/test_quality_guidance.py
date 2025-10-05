@@ -329,13 +329,18 @@ def test_final_deliverable_review_applies_enhanced_output() -> None:
 
     run_async(pipe.execute_plan(plan))
 
-    assert pipe.final_review_prompts, "Final review prompt should have been generated"
-    assert "Do **not** summarize" in pipe.final_review_prompts[0]
-
     final_action_output = next(
         a.output for a in plan.actions if a.id == "final_synthesis"
     )
 
     assert final_action_output is not None
-    assert final_action_output["primary_output"].startswith("# Refined Report")
-    assert final_action_output["supporting_details"] == "- Reorganized sections for clarity"
+
+    primary = final_action_output["primary_output"]
+    assert "## Résultats par étape" in primary
+    assert "Étape 1" in primary
+    assert "Background findings" in primary
+
+    supporting = final_action_output["supporting_details"]
+    assert "### Points forts" in supporting
+    assert "### Axes d'amélioration" in supporting
+    assert "### Prochaines étapes recommandées" in supporting

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -41,8 +40,23 @@ class FinalSynthesisRenderingPipe(Pipe):
                 "supporting_details": "Compiled from prior research.",
             },
             "product_objectives": {
-                "primary_output": "- Objective one\n- Objective two",
+                "primary_output": "```sql\nSELECT * FROM roadmap WHERE priority = 'high';\n```",
                 "supporting_details": "Prioritized deliverables list.",
+            },
+        }
+
+        quality_snapshots = {
+            "executive_summary": {
+                "quality_score": 0.92,
+                "summary": "Narration complète et précise.",
+                "issues": [],
+                "suggestions": ["Valider le ton avec l'équipe produit."],
+            },
+            "product_objectives": {
+                "quality_score": 0.68,
+                "summary": "Liste pertinente mais encore perfectible.",
+                "issues": ["Ajouter un objectif sur la scalabilité."],
+                "suggestions": ["Clarifier les métriques d'impact attendues."],
             },
         }
 
@@ -53,25 +67,19 @@ class FinalSynthesisRenderingPipe(Pipe):
         action.output = result
         action.status = "completed"
         action.end_time = datetime.now().strftime("%H:%M:%S")
-        return result
 
-    async def review_final_deliverable(  # type: ignore[override]
-        self,
-        plan: Plan,
-        assembled_output: str,
-        default_supporting_details: str = "Final synthesis completed",
-    ) -> dict[str, str]:
-        return {
-            "primary_output": assembled_output,
-            "supporting_details": default_supporting_details,
-        }
+        plan.metadata.setdefault("raw_action_outputs", {})[action.id] = result
+        plan.metadata.setdefault("action_quality", {})[action.id] = (
+            quality_snapshots[action.id]
+        )
+        return result
 
 
 def run_execute_plan(pipe: FinalSynthesisRenderingPipe, plan: Plan) -> None:
     asyncio.run(pipe.execute_plan(plan))
 
 
-def test_final_synthesis_replaces_double_brace_placeholders() -> None:
+def test_final_synthesis_outputs_step_summaries_and_review() -> None:
     pipe = FinalSynthesisRenderingPipe()
 
     plan = Plan(
@@ -107,7 +115,32 @@ def test_final_synthesis_replaces_double_brace_placeholders() -> None:
 
     primary_output = final_action.output.get("primary_output", "")
     assert primary_output, "Final synthesis output should not be empty"
-    assert "{{" not in primary_output
-    assert re.search(r"\{[^}]+\}", primary_output) is None
+    assert "## Résultats par étape" in primary_output
+    assert "Étape 1 · Draft the executive summary" in primary_output
+    assert "Score qualité : 0.92" in primary_output
+    assert "Commentaires qualité : Narration complète et précise." in primary_output
     assert "Summary content with clear narrative." in primary_output
-    assert "- Objective one" in primary_output
+    assert "Étape 2 · List the key objectives" in primary_output
+    assert "Score qualité : 0.68" in primary_output
+    assert "```sql\nSELECT * FROM roadmap WHERE priority = 'high';\n```" in primary_output
+    assert "Ajouter un objectif sur la scalabilité." in primary_output
+
+    review_output = final_action.output.get("supporting_details", "")
+    assert "### Points forts" in review_output
+    assert "Draft the executive summary" in review_output
+    assert "### Axes d'amélioration" in review_output
+    assert "Ajouter un objectif sur la scalabilité." in review_output
+    assert "### Prochaines étapes recommandées" in review_output
+    assert "Clarifier les métriques d'impact attendues." in review_output
+    assert "```sql\nSELECT * FROM roadmap WHERE priority = 'high';\n```" not in review_output
+
+    final_metadata = plan.metadata.get("final_synthesis", {})
+    assert final_metadata.get("stepwise_summary") == primary_output
+
+    raw_outputs = plan.metadata.get("raw_action_outputs", {})
+    assert raw_outputs.get("executive_summary", {}).get(
+        "primary_output"
+    ) == "Summary content with clear narrative."
+    assert raw_outputs.get("product_objectives", {}).get("primary_output") == (
+        "```sql\nSELECT * FROM roadmap WHERE priority = 'high';\n```"
+    )

@@ -20,7 +20,8 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 * **🧠 Intelligent Planning:** Automatically breaks down goals into actionable steps with dependency mapping
 * **🎨 Specialized Models:** Dedicated models for writing (WRITER_MODEL), coding (CODER_MODEL), and tool usage (ACTION_MODEL) with automatic routing
 * **🔍 Quality Control:** Real-time output analysis with quality scoring (0.0-1.0) and iterative improvement
-* **📝 Editorial Final Review:** Automatic post-synthesis review that expands and restructures the deliverable for coherent, detail-rich output
+* **📝 Stepwise Final Reporting:** Final synthesis now surfaces each action sequentially with its Mermaid label, quality score, evaluator comments, and delivered output
+* **🧾 Focused Review Feedback:** The concluding review highlights strengths, improvement areas, and recommended next steps without rewriting the assembled deliverable
 * **🎭 Interactive Error Handling:** When actions fail or produce low-quality outputs, the system pauses and prompts you with options: retry with custom guidance/instructions, retry as-is, approve current output despite warnings, or abort the entire plan execution
 * **📊 Live Progress:** Real-time Mermaid diagrams with color-coded status indicators
 * **🧩 Template System:** Final synthesis using `{{action_id}}` placeholders for seamless content assembly
@@ -47,6 +48,12 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 - `SHOW_ACTION_SUMMARIES` (true): Detailed execution summaries
 - `AUTOMATIC_TAKS_REQUIREMENT_ENHANCEMENT` (false): AI-enhanced requirements
 - `ENABLE_TOOL_INTEGRATION` (true): Enable automatic tool discovery, usage, scoring impact, and prompt adaptations. Set to `false` to completely ignore Open WebUI tools.
+
+### 🧾 Final Output Structure
+
+- **Stepwise Results:** Each completed action is reported in order with its Mermaid step name, quality score, evaluator comments, and the generated output. Supporting details remain available in collapsible sections when provided.
+- **Preserved Raw Outputs:** The final synthesis embeds the exact raw outputs from each step—no additional LLM post-processing—ensuring the deliverables remain identical to their original generation.
+- **Review-Only Finale:** The closing review action now delivers a strengths/weaknesses/next-steps analysis for the collected outputs without modifying the deliverables themselves, using the preassembled stepwise summary strictly as read-only context.
 
 **Testing:**
 
