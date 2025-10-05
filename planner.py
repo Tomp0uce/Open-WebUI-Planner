@@ -2082,12 +2082,15 @@ If no suitable tools are found, return an empty array: []
 
         if not final_synthesis:
             await self.emit_status(
-                "error",
-                "Missing mandatory final_synthesis step! The plan must include a final synthesis template that combines outputs into a deliverable.",
+                "warning",
+                "Missing mandatory final_synthesis step! Auto-inserting default final_synthesis action referencing prior actions.",
                 False,
             )
-            logger.error("Plan missing required final_synthesis action.")
-            return
+            logger.warning(
+                "Plan missing required final_synthesis action; auto-inserting fallback template before enhancement."
+            )
+            final_synthesis = self._build_default_final_synthesis_action(plan)
+            plan.actions.append(final_synthesis)
 
         template = final_synthesis.description
 
