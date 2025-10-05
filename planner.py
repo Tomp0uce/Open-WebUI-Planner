@@ -147,6 +147,46 @@ def clean_json_response(response_text: str) -> str:
     return response_text[start:end]
 
 
+def _clean_inline_text(value: str) -> str:
+    """Normalize whitespace for inline rendering."""
+
+    if not isinstance(value, str):
+        return ""
+
+    cleaned = re.sub(r"\s+", " ", value).strip()
+    return cleaned
+
+
+def _build_step_short_label(description: str) -> str:
+    """Return a 3-4 word summary label for a step description."""
+
+    normalized = _clean_inline_text(description)
+    if not normalized:
+        tokens: list[str] = []
+    else:
+        raw_tokens = normalized.split()
+        tokens = [re.sub(r"^[^\wÀ-ÿ]+|[^\wÀ-ÿ]+$", "", token) for token in raw_tokens]
+        tokens = [token for token in tokens if token]
+
+    max_words = 4
+    min_words = 3
+    short_tokens = tokens[:max_words]
+    fallback_cycle = ["suivi", "priorités", "focus", "actions"]
+
+    while len(short_tokens) < min_words:
+        if fallback_cycle:
+            short_tokens.append(fallback_cycle.pop(0))
+        elif tokens:
+            short_tokens.append(tokens[-1])
+        else:
+            short_tokens.append("priorités")
+
+    if len(short_tokens) > max_words:
+        short_tokens = short_tokens[:max_words]
+
+    return " ".join(short_tokens)
+
+
 def parse_structured_output(response: str) -> dict[str, str]:
     """
     Parse agent output into structured format {"primary_output": str, "supporting_details": str}.
@@ -3165,106 +3205,235 @@ Google's Gemini Advancements..."}
                 "supporting_details": default_supporting_details,
             }
 
-        strengths: list[str] = []
-        improvements: list[str] = []
-        next_steps: list[str] = []
+        step_actions = [
+            action for action in plan.actions if action.id != "final_synthesis"
+        ]
 
-        for action in plan.actions:
-            if action.id == "final_synthesis":
-                continue
+        step_infos: list[dict[str, Any]] = []
+        detailed_strengths: list[str] = []
+        detailed_improvements: list[str] = []
+        detailed_next_steps: list[str] = []
 
-            snapshot = quality_data.get(action.id)
-            if not snapshot:
-                continue
+        for index, action in enumerate(step_actions, start=1):
+            snapshot = quality_data.get(action.id, {}) or {}
 
-            score = snapshot.get("quality_score")
-            summary = snapshot.get("summary") or "Aucun retour qualitatif."
+            score_raw = snapshot.get("quality_score")
+            score_value = (
+                float(score_raw)
+                if isinstance(score_raw, (int, float))
+                else None
+            )
+            score_display = f"{score_value:.2f}" if score_value is not None else "N/A"
+
+            summary_text = _clean_inline_text(
+                snapshot.get("summary") or "Aucun retour qualitatif."
+            )
             issues = [
-                issue.strip()
+                _clean_inline_text(issue)
                 for issue in snapshot.get("issues", [])
-                if isinstance(issue, str) and issue.strip()
+                if isinstance(issue, str) and _clean_inline_text(issue)
             ]
             suggestions = [
-                suggestion.strip()
+                _clean_inline_text(suggestion)
                 for suggestion in snapshot.get("suggestions", [])
-                if isinstance(suggestion, str) and suggestion.strip()
+                if isinstance(suggestion, str) and _clean_inline_text(suggestion)
             ]
 
-            descriptor = f"Étape «{action.description}»"
-            if isinstance(score, (int, float)):
-                descriptor = f"{descriptor} – Score {score:.2f}"
-            else:
-                descriptor = f"{descriptor} – Score N/A"
+            short_label = _build_step_short_label(action.description)
+            descriptor = f"Étape {index} – {short_label}"
+            is_high_score = score_value is not None and score_value >= 0.8
 
-            is_high_score = isinstance(score, (int, float)) and score >= 0.8
             if is_high_score:
-                strengths.append(f"- {descriptor} : {summary}")
+                detailed_strengths.append(
+                    f"- {descriptor} : {summary_text or 'Qualité confirmée.'}"
+                )
             else:
-                improvements.append(f"- {descriptor} : {summary}")
+                detailed_improvements.append(
+                    f"- {descriptor} : {summary_text or 'Clarifier la qualité attendue.'}"
+                )
+
+            for issue in issues:
+                detailed_improvements.append(f"  • {issue}")
+
+            if suggestions:
+                for suggestion in suggestions:
+                    detailed_next_steps.append(f"- {descriptor} : {suggestion}")
+            elif issues:
+                for issue in issues:
+                    detailed_next_steps.append(f"- {descriptor} : Résoudre : {issue}")
+
+            point_fort_text = summary_text or "—"
+            if is_high_score and summary_text:
+                point_fort_text = f"Score {score_display} · {summary_text}"
+            elif is_high_score:
+                point_fort_text = f"Score {score_display} validé"
 
             if issues:
-                if is_high_score:
-                    improvements.append(f"- {descriptor} : {summary}")
-                improvements.extend(f"  • {issue}" for issue in issues)
+                axes_text = "; ".join(issues)
+            elif not is_high_score and suggestions:
+                axes_text = "; ".join(suggestions)
+            elif not is_high_score:
+                axes_text = "Clarifier les livrables attendus"
+            else:
+                axes_text = "RAS"
 
-            for suggestion in suggestions:
-                next_steps.append(f"- {descriptor} : {suggestion}")
+            step_infos.append(
+                {
+                    "index": index,
+                    "label": short_label,
+                    "score": score_value,
+                    "score_display": score_display,
+                    "summary": summary_text,
+                    "issues": issues,
+                    "suggestions": suggestions,
+                    "points_forts": point_fort_text,
+                    "axes": axes_text,
+                }
+            )
 
-        if not strengths:
-            strengths.append(
+        if not detailed_strengths:
+            detailed_strengths.append(
                 "- Aucun point fort identifié automatiquement ; vérifier manuellement."
             )
 
-        if not improvements:
-            improvements.append("- Aucun axe d'amélioration détecté à ce stade.")
+        if not detailed_improvements:
+            detailed_improvements.append(
+                "- Aucun axe d'amélioration détecté à ce stade."
+            )
 
-        if not next_steps:
-            next_steps.append("- Aucune action complémentaire suggérée.")
+        if not detailed_next_steps:
+            detailed_next_steps.append("- Aucune action complémentaire suggérée.")
 
-        review_sections = [
-            "### Points forts",
-            *strengths,
-            "",
-            "### Axes d'amélioration",
-            *improvements,
-            "",
-            "### Prochaines étapes recommandées",
-            *next_steps,
-        ]
+        scored_steps = [info for info in step_infos if info["score"] is not None]
+        high_quality_count = len(
+            [info for info in scored_steps if info["score"] is not None and info["score"] >= 0.8]
+        )
 
-        analysed_steps = [
-            action
-            for action in plan.actions
-            if action.id != "final_synthesis"
-        ]
-        step_count = len(analysed_steps)
+        resume_lines: list[str] = []
+        if step_infos:
+            resume_lines.append(
+                f"- {len(step_infos)} étape(s) analysée(s) et consolidée(s)."
+            )
 
-        priority_items = [
-            item for item in improvements if item.strip().startswith("-")
-        ]
-        if not priority_items:
-            priority_items = [item for item in improvements if item.strip()]
+            if high_quality_count:
+                best_step = max(
+                    scored_steps,
+                    key=lambda info: info["score"] if info["score"] is not None else -1.0,
+                    default=None,
+                )
+                if best_step is not None:
+                    resume_lines.append(
+                        "- Étape {index} – {label} : score {score} confirmant la solidité.".format(
+                            index=best_step["index"],
+                            label=best_step["label"],
+                            score=best_step["score_display"],
+                        )
+                    )
+
+            if scored_steps:
+                lowest_sorted = sorted(
+                    scored_steps,
+                    key=lambda info: info["score"] if info["score"] is not None else 1.1,
+                )
+                lowest_step = lowest_sorted[0]
+                resume_lines.append(
+                    "- Étape {index} – {label} à renforcer (score {score}).".format(
+                        index=lowest_step["index"],
+                        label=lowest_step["label"],
+                        score=lowest_step["score_display"],
+                    )
+                )
+                if len(lowest_sorted) > 1:
+                    second_lowest = lowest_sorted[1]
+                    resume_lines.append(
+                        "- Étape {index} – {label} nécessite un suivi (score {score}).".format(
+                            index=second_lowest["index"],
+                            label=second_lowest["label"],
+                            score=second_lowest["score_display"],
+                        )
+                    )
+
+            total_recos = sum(len(info["suggestions"]) for info in step_infos)
+            if total_recos:
+                resume_lines.append(
+                    f"- {total_recos} recommandation(s) prioritaire(s) identifiée(s)."
+                )
+            else:
+                resume_lines.append("- Aucune recommandation urgente détectée.")
+        else:
+            resume_lines.append("- Aucun travail exécuté n'a pu être analysé.")
+
+        table_rows: list[str] = []
+        for info in step_infos:
+            table_rows.append(
+                "| Étape {index} – {label} | {strength} | {axis} |".format(
+                    index=info["index"],
+                    label=info["label"],
+                    strength=_clean_inline_text(info["points_forts"]),
+                    axis=_clean_inline_text(info["axes"]),
+                )
+            )
+
+        priority_entries: list[tuple[float, int, str, str]] = []
+        for info in step_infos:
+            priority_score = info["score"] if info["score"] is not None else 1.1
+            combined_actions = info["suggestions"][:]
+            if not combined_actions and info["issues"]:
+                combined_actions = [f"Résoudre : {issue}" for issue in info["issues"]]
+
+            for action_text in combined_actions:
+                priority_entries.append(
+                    (
+                        priority_score,
+                        info["index"],
+                        info["label"],
+                        action_text,
+                    )
+                )
+
+        priority_entries.sort(key=lambda item: (item[0], item[1]))
+
+        if not priority_entries:
+            priority_list = ["- Aucune action complémentaire suggérée."]
+        else:
+            priority_list = [
+                "- Étape {index} – {label} : {action}".format(
+                    index=index,
+                    label=label,
+                    action=_clean_inline_text(action_text),
+                )
+                for _, index, label, action_text in priority_entries
+            ]
 
         global_review_sections = [
             "---",
             "## Synthèse globale de la design review",
             "",
-            "### Résumé du travail réalisé",
-            (
-                f"- {step_count} étape(s) analysée(s) et consolidée(s) dans la synthèse finale."
-                if step_count
-                else "- Aucun travail exécuté n'a pu être analysé."
-            ),
+            "Section 1 : Résumé rapide",
+            *resume_lines[:6],
             "",
-            "### Points forts majeurs",
-            *strengths,
+            "Section 2 : Points forts et axes d'amélioration",
             "",
-            "### Points faibles et axes prioritaires",
-            *priority_items,
+            "| Étape | Points forts | Axes d'amélioration |",
+            "| :--- | :--- | :--- |",
+            *(table_rows if table_rows else ["| Aucune étape | — | — |"]),
             "",
-            "### Prochaines étapes prioritaires",
-            *next_steps,
+            "Section 3 : Prochaines étapes prioritaires",
+            *priority_list,
         ]
+
+        supporting_details = "\n".join(
+            [
+                "### Points forts",
+                *detailed_strengths,
+                "",
+                "### Axes d'amélioration",
+                *detailed_improvements,
+                "",
+                "### Prochaines étapes recommandées",
+                *detailed_next_steps,
+            ]
+        ).strip()
 
         primary_output = "\n".join(
             [
@@ -3276,7 +3445,7 @@ Google's Gemini Advancements..."}
 
         return {
             "primary_output": primary_output,
-            "supporting_details": "\n".join(review_sections).strip(),
+            "supporting_details": supporting_details,
         }
 
     async def execute_plan(self, plan: Plan) -> None:
