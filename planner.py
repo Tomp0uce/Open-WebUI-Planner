@@ -7,6 +7,7 @@ version: 2.2.0
 required_open_webui_version: 0.6.26
 """
 
+import copy
 import re
 import logging
 import json
@@ -2430,6 +2431,22 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
             f"Analyzed output (Quality Score: {reflection.quality_score:.2f} | Notes: {summary})"
         )
 
+    def _store_action_quality_snapshot(
+        self, plan: Plan, action: Action, reflection: ReflectionResult
+    ) -> None:
+        """Persist the quality evaluation for later reporting."""
+
+        quality_summary = self._summarize_quality_reflection(reflection)
+        snapshot = {
+            "quality_score": reflection.quality_score,
+            "summary": quality_summary,
+            "issues": list(reflection.issues),
+            "suggestions": list(reflection.suggestions),
+            "is_successful": reflection.is_successful,
+        }
+
+        plan.metadata.setdefault("action_quality", {})[action.id] = snapshot
+
     async def execute_action(
         self, plan: Plan, action: Action, context: dict[str, Any], step_number: int
     ) -> dict[str, Any]:
@@ -2735,6 +2752,10 @@ Focus ONLY on this specific step's output.
                 raise UserAbortedException(
                     action.id, "User chose to abort after action failure"
                 )
+
+        self._store_action_quality_snapshot(plan, action, best_reflection)
+        raw_outputs = plan.metadata.setdefault("raw_action_outputs", {})
+        raw_outputs[action.id] = copy.deepcopy(best_output)
 
         if not best_reflection.is_successful:
             action.status = "warning"
@@ -3056,13 +3077,75 @@ Google's Gemini Advancements..."}
             suggestions=["Retry the action."],
         )
 
+    def _build_stepwise_execution_summary(
+        self,
+        plan: Plan,
+        completed_results: dict[str, dict[str, str]],
+    ) -> str:
+        """Create a sequential report of each action's output and quality."""
+
+        sections: list[str] = ["## Résultats par étape"]
+        quality_data: dict[str, Any] = plan.metadata.get("action_quality", {})
+        raw_outputs: dict[str, Any] = plan.metadata.get("raw_action_outputs", {})
+        step_index = 1
+
+        for action in plan.actions:
+            if action.id == "final_synthesis":
+                continue
+
+            result = raw_outputs.get(action.id) or completed_results.get(action.id, {})
+            primary_output = result.get("primary_output", "").strip()
+            supporting_details = result.get("supporting_details", "").strip()
+
+            snapshot = quality_data.get(action.id, {})
+            score = snapshot.get("quality_score")
+            score_display = (
+                f"{score:.2f}" if isinstance(score, (int, float)) else "N/A"
+            )
+            comment = snapshot.get("summary") or "Aucun commentaire disponible."
+            issues = [
+                issue.strip()
+                for issue in snapshot.get("issues", [])
+                if isinstance(issue, str) and issue.strip()
+            ]
+
+            sections.append(f"### Étape {step_index} · {action.description}")
+            sections.append(f"- Score qualité : {score_display}")
+            sections.append(f"- Commentaires qualité : {comment}")
+            if issues:
+                sections.append("- Points à surveiller :")
+                sections.extend(f"  • {issue}" for issue in issues)
+
+            sections.append("")
+            sections.append("**Résultat**")
+            sections.append(
+                primary_output if primary_output else "_Aucun résultat fourni._"
+            )
+
+            if supporting_details:
+                sections.append("")
+                sections.append("<details>")
+                sections.append("<summary>📋 Détails complémentaires</summary>")
+                sections.append("")
+                sections.append(supporting_details)
+                sections.append("")
+                sections.append("</details>")
+
+            sections.append("")
+            step_index += 1
+
+        if len(sections) == 1:
+            sections.append("_Aucune étape exécutée._")
+
+        return "\n".join(sections).strip()
+
     async def review_final_deliverable(
         self,
         plan: Plan,
         assembled_output: str,
         default_supporting_details: str = "Final synthesis completed",
     ) -> dict[str, str]:
-        """Run a focused editorial review over the assembled final deliverable."""
+        """Produce a qualitative review without rewriting the assembled deliverable."""
 
         await self.emit_status(
             "info",
@@ -3070,93 +3153,84 @@ Google's Gemini Advancements..."}
             False,
         )
 
-        review_prompt = textwrap.dedent(
-            f"""
-            You are a senior product editor performing the final quality pass on a deliverable.
-
-            OVERALL GOAL: {plan.goal}
-
-            ASSEMBLED DELIVERABLE (direct output shown below):
-            ---
-            {assembled_output}
-            ---
-
-            REVIEW OBJECTIVES:
-            1. Preserve ALL factual details and sections from the assembled deliverable. Do **not** summarize or shorten content.
-               Expand sections when clarification or connective text is required to improve cohesion.
-            2. Ensure the structure flows logically with clear headings, transitions, and formatting consistency.
-            3. Resolve redundancy, contradictions, or abrupt jumps introduced by concatenating multiple steps.
-            4. Highlight any remaining gaps or risks in supporting details so the team knows what to revisit.
-
-            OUTPUT REQUIREMENTS (JSON ONLY):
-            {{
-                "primary_output": "Improved deliverable in Markdown, equal or longer in detail than the input.",
-                "supporting_details": "Bullet list summarizing editorial adjustments, open issues, or follow-up notes."
-            }}
-
-            Maintain professional French/English mixing as given, and keep actionable sections explicit.
-            Return only the JSON object with no additional commentary.
-            """
-        ).strip()
-
-        review_format: dict[str, Any] = {
-            "type": "json_schema",
-            "json_schema": {
-                "name": "final_deliverable_review",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {
-                        "primary_output": {"type": "string"},
-                        "supporting_details": {"type": "string"},
-                    },
-                    "required": ["primary_output", "supporting_details"],
-                    "additionalProperties": False,
-                },
-            },
-        }
-
-        try:
-            review_response = await self.get_completion(
-                prompt=review_prompt,
-                format=review_format,
-                action_results={},
-                action=None,
-            )
-
-            cleaned_response = clean_json_response(review_response)
-            review_data = json.loads(cleaned_response)
-
-            refined_primary = str(review_data.get("primary_output", "")).strip()
-            refined_supporting = str(review_data.get("supporting_details", "")).strip()
-
-            if not refined_primary:
-                raise ValueError("Reviewed deliverable returned an empty primary_output")
-
-            await self.emit_status(
-                "success",
-                "Final deliverable review completed.",
-                False,
-            )
-
-            return {
-                "primary_output": refined_primary,
-                "supporting_details": refined_supporting or default_supporting_details,
-            }
-
-        except Exception as review_error:  # noqa: BLE001
-            logger.warning(
-                "Final deliverable review failed: %s", review_error, exc_info=True
-            )
-            await self.emit_status(
-                "warning",
-                "Final review failed; using assembled deliverable without edits.",
-                False,
-            )
+        quality_data: dict[str, Any] = plan.metadata.get("action_quality", {})
+        if not quality_data:
             return {
                 "primary_output": assembled_output,
                 "supporting_details": default_supporting_details,
             }
+
+        strengths: list[str] = []
+        improvements: list[str] = []
+        next_steps: list[str] = []
+
+        for action in plan.actions:
+            if action.id == "final_synthesis":
+                continue
+
+            snapshot = quality_data.get(action.id)
+            if not snapshot:
+                continue
+
+            score = snapshot.get("quality_score")
+            summary = snapshot.get("summary") or "Aucun retour qualitatif."
+            issues = [
+                issue.strip()
+                for issue in snapshot.get("issues", [])
+                if isinstance(issue, str) and issue.strip()
+            ]
+            suggestions = [
+                suggestion.strip()
+                for suggestion in snapshot.get("suggestions", [])
+                if isinstance(suggestion, str) and suggestion.strip()
+            ]
+
+            descriptor = f"Étape «{action.description}»"
+            if isinstance(score, (int, float)):
+                descriptor = f"{descriptor} – Score {score:.2f}"
+            else:
+                descriptor = f"{descriptor} – Score N/A"
+
+            is_high_score = isinstance(score, (int, float)) and score >= 0.8
+            if is_high_score:
+                strengths.append(f"- {descriptor} : {summary}")
+            else:
+                improvements.append(f"- {descriptor} : {summary}")
+
+            if issues:
+                if is_high_score:
+                    improvements.append(f"- {descriptor} : {summary}")
+                improvements.extend(f"  • {issue}" for issue in issues)
+
+            for suggestion in suggestions:
+                next_steps.append(f"- {descriptor} : {suggestion}")
+
+        if not strengths:
+            strengths.append(
+                "- Aucun point fort identifié automatiquement ; vérifier manuellement."
+            )
+
+        if not improvements:
+            improvements.append("- Aucun axe d'amélioration détecté à ce stade.")
+
+        if not next_steps:
+            next_steps.append("- Aucune action complémentaire suggérée.")
+
+        review_sections = [
+            "### Points forts",
+            *strengths,
+            "",
+            "### Axes d'amélioration",
+            *improvements,
+            "",
+            "### Prochaines étapes recommandées",
+            *next_steps,
+        ]
+
+        return {
+            "primary_output": assembled_output,
+            "supporting_details": "\n".join(review_sections).strip(),
+        }
 
     async def execute_plan(self, plan: Plan) -> None:
         """
@@ -3243,9 +3317,17 @@ Google's Gemini Advancements..."}
                                 f"Could not find output for placeholder '{single_placeholder}'. It may have failed or was not executed. It will be left in the final output."
                             )
 
+                final_metadata = plan.metadata.setdefault("final_synthesis", {})
+                final_metadata["assembled_template"] = final_output
+
+                stepwise_summary = self._build_stepwise_execution_summary(
+                    plan, completed_results
+                )
+                final_metadata["stepwise_summary"] = stepwise_summary
+
                 action.output = await self.review_final_deliverable(
                     plan,
-                    final_output,
+                    stepwise_summary,
                     default_supporting_details="Final synthesis completed",
                 )
                 action.status = "completed"
