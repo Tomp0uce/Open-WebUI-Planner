@@ -6,7 +6,7 @@ import sys
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-from planner import Pipe  # noqa: E402
+from planner import Action, Pipe, Plan  # noqa: E402
 
 
 class PipeWithoutFinalSynthesis(Pipe):
@@ -95,3 +95,58 @@ def test_final_synthesis_added_for_empty_plan() -> None:
     assert plan.actions[-1].dependencies == []
     assert "{{" not in plan.actions[-1].description
     assert "Final Deliverable" in plan.actions[-1].description
+
+
+class TemplateValidationPipe(Pipe):
+    def __init__(self) -> None:
+        super().__init__()
+        self.valves.ENABLE_TOOL_INTEGRATION = False
+        self.captured_statuses: list[tuple[str, str]] = []
+
+    async def emit_status(  # type: ignore[override]
+        self, level: str, message: str, *_args, **_kwargs
+    ) -> None:
+        self.captured_statuses.append((level, message))
+
+    async def get_completion(  # type: ignore[override]
+        self,
+        prompt,
+        model: str | dict[str, object] = "",
+        tools: dict[str, dict[object, object]] | None = None,
+        format: dict[str, object] | None = None,
+        action_results: dict[str, dict[str, str]] | None = None,
+        action=None,
+    ) -> str:
+        return "## Enhanced Template\n{{research_topic}}\n{{write_summary}}"
+
+
+def test_validate_and_enhance_template_auto_inserts_final_synthesis() -> None:
+    pipe = TemplateValidationPipe()
+    plan = Plan(
+        goal="Ensure template validation handles missing final synthesis",
+        actions=[
+            Action(
+                id="research_topic",
+                type="text",
+                description="Research the assigned topic",
+            ),
+            Action(
+                id="write_summary",
+                type="text",
+                description="Write a concise summary",
+            ),
+        ],
+    )
+
+    asyncio.run(pipe.validate_and_enhance_template(plan))
+
+    final_action = plan.actions[-1]
+    assert final_action.id == "final_synthesis"
+    assert final_action.dependencies == ["research_topic", "write_summary"]
+    assert "{{research_topic}}" in final_action.description
+    assert "{{write_summary}}" in final_action.description
+    assert any(
+        level == "warning"
+        and "auto-inserting default final_synthesis" in message.lower()
+        for level, message in pipe.captured_statuses
+    )
