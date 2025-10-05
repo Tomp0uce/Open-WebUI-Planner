@@ -169,7 +169,7 @@ def _build_step_short_label(description: str) -> str:
         tokens = [token for token in tokens if token]
 
     max_words = 4
-    min_words = 3
+    min_words = 1
     short_tokens = tokens[:max_words]
     fallback_cycle = ["suivi", "priorités", "focus", "actions"]
 
