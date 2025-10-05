@@ -3087,12 +3087,14 @@ Google's Gemini Advancements..."}
         sections: list[str] = ["## Résultats par étape"]
         quality_data: dict[str, Any] = plan.metadata.get("action_quality", {})
         raw_outputs: dict[str, Any] = plan.metadata.get("raw_action_outputs", {})
-        step_index = 1
 
-        for action in plan.actions:
-            if action.id == "final_synthesis":
-                continue
+        step_actions = [
+            action for action in plan.actions if action.id != "final_synthesis"
+        ]
 
+        total_steps = len(step_actions)
+
+        for index, action in enumerate(step_actions, start=1):
             result = raw_outputs.get(action.id) or completed_results.get(action.id, {})
             primary_output = result.get("primary_output", "").strip()
             supporting_details = result.get("supporting_details", "").strip()
@@ -3109,7 +3111,7 @@ Google's Gemini Advancements..."}
                 if isinstance(issue, str) and issue.strip()
             ]
 
-            sections.append(f"### Étape {step_index} · {action.description}")
+            sections.append(f"### Étape {index} · {action.description}")
             sections.append(f"- Score qualité : {score_display}")
             sections.append(f"- Commentaires qualité : {comment}")
             if issues:
@@ -3132,7 +3134,10 @@ Google's Gemini Advancements..."}
                 sections.append("</details>")
 
             sections.append("")
-            step_index += 1
+
+            if index < total_steps:
+                sections.append("---")
+                sections.append("")
 
         if len(sections) == 1:
             sections.append("_Aucune étape exécutée._")
@@ -3227,8 +3232,50 @@ Google's Gemini Advancements..."}
             *next_steps,
         ]
 
+        analysed_steps = [
+            action
+            for action in plan.actions
+            if action.id != "final_synthesis"
+        ]
+        step_count = len(analysed_steps)
+
+        priority_items = [
+            item for item in improvements if item.strip().startswith("-")
+        ]
+        if not priority_items:
+            priority_items = [item for item in improvements if item.strip()]
+
+        global_review_sections = [
+            "---",
+            "## Synthèse globale de la design review",
+            "",
+            "### Résumé du travail réalisé",
+            (
+                f"- {step_count} étape(s) analysée(s) et consolidée(s) dans la synthèse finale."
+                if step_count
+                else "- Aucun travail exécuté n'a pu être analysé."
+            ),
+            "",
+            "### Points forts majeurs",
+            *strengths,
+            "",
+            "### Points faibles et axes prioritaires",
+            *priority_items,
+            "",
+            "### Prochaines étapes prioritaires",
+            *next_steps,
+        ]
+
+        primary_output = "\n".join(
+            [
+                assembled_output.strip(),
+                "",
+                "\n".join(global_review_sections).strip(),
+            ]
+        ).strip()
+
         return {
-            "primary_output": assembled_output,
+            "primary_output": primary_output,
             "supporting_details": "\n".join(review_sections).strip(),
         }
 
@@ -3323,12 +3370,15 @@ Google's Gemini Advancements..."}
                 stepwise_summary = self._build_stepwise_execution_summary(
                     plan, completed_results
                 )
-                final_metadata["stepwise_summary"] = stepwise_summary
+                final_metadata["raw_stepwise_summary"] = stepwise_summary
 
                 action.output = await self.review_final_deliverable(
                     plan,
                     stepwise_summary,
                     default_supporting_details="Final synthesis completed",
+                )
+                final_metadata["stepwise_summary"] = action.output.get(
+                    "primary_output", stepwise_summary
                 )
                 action.status = "completed"
                 action.end_time = datetime.now().strftime("%H:%M:%S")
