@@ -15,6 +15,107 @@ import asyncio
 import textwrap
 import sys
 import types
+import importlib.util
+import typing
+
+if importlib.util.find_spec("pydantic") is None:
+    pydantic_stub = types.ModuleType("pydantic")
+
+    class _FieldInfo:
+        def __init__(
+            self,
+            default: typing.Any = None,
+            default_factory: typing.Callable[[], typing.Any] | None = None,
+            **_kwargs: typing.Any,
+        ) -> None:
+            self.default = default
+            self.default_factory = default_factory
+
+    class _BaseModelMeta(type):
+        def __new__(
+            cls,
+            name: str,
+            bases: tuple[type, ...],
+            namespace: dict[str, typing.Any],
+        ) -> type:
+            field_configs: dict[str, _FieldInfo] = {}
+            simple_defaults: dict[str, typing.Any] = {}
+
+            for attr_name, attr_value in list(namespace.items()):
+                if isinstance(attr_value, _FieldInfo):
+                    field_configs[attr_name] = attr_value
+                    namespace[attr_name] = None
+                elif not attr_name.startswith("__") and not callable(attr_value):
+                    simple_defaults[attr_name] = attr_value
+
+            new_cls = super().__new__(cls, name, bases, namespace)
+
+            merged_defaults: dict[str, typing.Any] = {}
+            merged_fields: dict[str, _FieldInfo] = {}
+
+            for base in reversed(bases):
+                merged_defaults.update(getattr(base, "__field_defaults__", {}))
+                merged_fields.update(getattr(base, "__field_configs__", {}))
+
+            merged_defaults.update(simple_defaults)
+            merged_fields.update(field_configs)
+
+            setattr(new_cls, "__field_defaults__", merged_defaults)
+            setattr(new_cls, "__field_configs__", merged_fields)
+            return new_cls
+
+    class _BaseModel(metaclass=_BaseModelMeta):
+        __field_defaults__: dict[str, typing.Any] = {}
+        __field_configs__: dict[str, _FieldInfo] = {}
+
+        def __init__(self, **data: typing.Any) -> None:
+            values: dict[str, typing.Any] = {}
+
+            for field_name, config in self.__field_configs__.items():
+                if field_name in data:
+                    continue
+                if config.default_factory is not None:
+                    values[field_name] = config.default_factory()
+                else:
+                    values[field_name] = copy.deepcopy(config.default)
+
+            for field_name, default_value in self.__field_defaults__.items():
+                if field_name not in data and field_name not in values:
+                    values[field_name] = copy.deepcopy(default_value)
+
+            values.update(data)
+
+            for key, value in values.items():
+                setattr(self, key, value)
+
+        def _to_plain_value(self, value: typing.Any) -> typing.Any:
+            if isinstance(value, _BaseModel):
+                return value.model_dump()
+            if isinstance(value, list):
+                return [self._to_plain_value(item) for item in value]
+            if isinstance(value, tuple):
+                return tuple(self._to_plain_value(item) for item in value)
+            if isinstance(value, dict):
+                return {key: self._to_plain_value(val) for key, val in value.items()}
+            return copy.deepcopy(value)
+
+        def model_dump(self) -> dict[str, typing.Any]:
+            return {key: self._to_plain_value(value) for key, value in self.__dict__.items()}
+
+        def model_dump_json(self) -> str:
+            return json.dumps(self.model_dump())
+
+    def _field(
+        default: typing.Any = None,
+        *,
+        default_factory: typing.Callable[[], typing.Any] | None = None,
+        **_kwargs: typing.Any,
+    ) -> _FieldInfo:
+        return _FieldInfo(default=default, default_factory=default_factory)
+
+    pydantic_stub.BaseModel = _BaseModel
+    pydantic_stub.Field = _field
+    sys.modules.setdefault("pydantic", pydantic_stub)
 
 if "fastapi" not in sys.modules:
     fastapi_stub = types.ModuleType("fastapi")
@@ -185,6 +286,23 @@ def _build_step_short_label(description: str) -> str:
         short_tokens = short_tokens[:max_words]
 
     return " ".join(short_tokens)
+
+
+def _build_content_excerpt(text: str, max_length: int = 160) -> str:
+    """Return a short excerpt suitable for inline reporting."""
+
+    normalized = _clean_inline_text(text)
+    if not normalized:
+        return ""
+
+    if len(normalized) <= max_length:
+        return normalized
+
+    truncated = normalized[:max_length].rsplit(" ", 1)[0].rstrip(",.;:")
+    if len(truncated) < int(max_length * 0.6):
+        truncated = normalized[:max_length].rstrip(",.;:")
+
+    return truncated + "…"
 
 
 def parse_structured_output(response: str) -> dict[str, str]:
@@ -672,6 +790,7 @@ WORKING GUIDELINES:
         self.type = "manifold"
         self.valves = self.Valves()
         self.current_output = ""
+        self._emitted_messages: list[str] = []
 
     @property
     def tool_integration_enabled(self) -> bool:
@@ -3205,6 +3324,30 @@ Google's Gemini Advancements..."}
                 "supporting_details": default_supporting_details,
             }
 
+        raw_outputs: dict[str, Any] = plan.metadata.get("raw_action_outputs", {})
+        emitted_messages: list[str] = []
+        emitted_messages.extend(
+            msg
+            for msg in plan.metadata.get("emitted_messages", [])
+            if isinstance(msg, str)
+        )
+
+        internal_messages = getattr(self, "_emitted_messages", None)
+        if internal_messages:
+            emitted_messages.extend(
+                msg for msg in internal_messages if isinstance(msg, str)
+            )
+
+        aggregated_fragments: list[str] = []
+        for fragment in emitted_messages:
+            cleaned_fragment = _clean_inline_text(fragment)
+            if cleaned_fragment:
+                aggregated_fragments.append(cleaned_fragment)
+
+        assembled_clean = _clean_inline_text(assembled_output)
+        if assembled_clean:
+            aggregated_fragments.append(assembled_clean)
+
         step_actions = [
             action for action in plan.actions if action.id != "final_synthesis"
         ]
@@ -3239,17 +3382,33 @@ Google's Gemini Advancements..."}
                 if isinstance(suggestion, str) and _clean_inline_text(suggestion)
             ]
 
+            raw_result = raw_outputs.get(action.id, {}) or {}
+            raw_primary = str(raw_result.get("primary_output", "") or "")
+            raw_support = str(raw_result.get("supporting_details", "") or "")
+            step_combined = " ".join(
+                part for part in [raw_primary, raw_support] if part.strip()
+            )
+            if step_combined:
+                aggregated_fragments.append(_clean_inline_text(step_combined))
+            content_excerpt = _build_content_excerpt(step_combined)
+
             short_label = _build_step_short_label(action.description)
             descriptor = f"Étape {index} – {short_label}"
             is_high_score = score_value is not None and score_value >= 0.8
 
             if is_high_score:
-                detailed_strengths.append(
-                    f"- {descriptor} : {summary_text or 'Qualité confirmée.'}"
-                )
+                strength_comment = summary_text or "Qualité confirmée."
+                if content_excerpt:
+                    strength_comment += f" (Extrait : {content_excerpt})"
+                detailed_strengths.append(f"- {descriptor} : {strength_comment}")
             else:
+                improvement_comment = (
+                    summary_text or "Clarifier la qualité attendue."
+                )
+                if content_excerpt:
+                    improvement_comment += f" (Extrait : {content_excerpt})"
                 detailed_improvements.append(
-                    f"- {descriptor} : {summary_text or 'Clarifier la qualité attendue.'}"
+                    f"- {descriptor} : {improvement_comment}"
                 )
 
             for issue in issues:
@@ -3262,20 +3421,33 @@ Google's Gemini Advancements..."}
                 for issue in issues:
                     detailed_next_steps.append(f"- {descriptor} : Résoudre : {issue}")
 
-            point_fort_text = summary_text or "—"
-            if is_high_score and summary_text:
-                point_fort_text = f"Score {score_display} · {summary_text}"
+            point_fort_parts: list[str] = []
+            if summary_text:
+                point_fort_parts.append(f"Analyse : {summary_text}")
             elif is_high_score:
-                point_fort_text = f"Score {score_display} validé"
+                point_fort_parts.append("Analyse : Livrable conforme.")
+            if content_excerpt:
+                point_fort_parts.append(f"Contenu : {content_excerpt}")
+            if not point_fort_parts:
+                point_fort_parts.append("Analyse : Livrable conforme.")
+            point_fort_text = " · ".join(point_fort_parts)
 
+            axes_parts: list[str] = []
             if issues:
-                axes_text = "; ".join(issues)
-            elif not is_high_score and suggestions:
-                axes_text = "; ".join(suggestions)
+                axes_parts.append("; ".join(issues))
+            elif suggestions:
+                axes_parts.append("; ".join(suggestions))
             elif not is_high_score:
-                axes_text = "Clarifier les livrables attendus"
+                axes_parts.append(
+                    "Clarifier les attentes fonctionnelles et ajouter des exemples."
+                )
             else:
-                axes_text = "RAS"
+                axes_parts.append("Surveiller la continuité de la qualité livrée.")
+            if content_excerpt:
+                axes_parts.append(f"Contenu : {content_excerpt}")
+            axes_text = " · ".join(
+                _clean_inline_text(part) for part in axes_parts if part.strip()
+            )
 
             step_infos.append(
                 {
@@ -3286,6 +3458,7 @@ Google's Gemini Advancements..."}
                     "summary": summary_text,
                     "issues": issues,
                     "suggestions": suggestions,
+                    "excerpt": content_excerpt,
                     "points_forts": point_fort_text,
                     "axes": axes_text,
                 }
@@ -3304,71 +3477,103 @@ Google's Gemini Advancements..."}
         if not detailed_next_steps:
             detailed_next_steps.append("- Aucune action complémentaire suggérée.")
 
+        content_highlights = [
+            info.get("excerpt")
+            for info in step_infos
+            if info.get("excerpt")
+        ]
+        transcript_excerpt = ""
+        if content_highlights:
+            combined_highlights = "; ".join(content_highlights[:3])
+            transcript_excerpt = _build_content_excerpt(combined_highlights, 180)
+        else:
+            aggregated_concat = " ".join(
+                fragment for fragment in aggregated_fragments if fragment
+            )
+            transcript_excerpt = _build_content_excerpt(aggregated_concat, 180)
+
         scored_steps = [info for info in step_infos if info["score"] is not None]
-        high_quality_count = len(
-            [info for info in scored_steps if info["score"] is not None and info["score"] >= 0.8]
-        )
+        high_quality_steps = [info for info in scored_steps if info["score"] is not None and info["score"] >= 0.8]
+
+        positive_highlights = []
+        for info in high_quality_steps:
+            base_summary = info["summary"] or "Livrable conforme aux attentes."
+            highlight = "Étape {index} – {label} ({score}) : {summary}".format(
+                index=info["index"],
+                label=info["label"],
+                score=info["score_display"],
+                summary=base_summary,
+            )
+            if info.get("excerpt"):
+                highlight += f" (Extrait : {info['excerpt']})"
+            positive_highlights.append(highlight)
+
+        vigilance_highlights: list[str] = []
+        for info in step_infos:
+            issues = info["issues"]
+            suggestions = info["suggestions"]
+            focus_items = issues if issues else suggestions
+            if focus_items:
+                focus_text = "; ".join(focus_items)
+                if info.get("excerpt"):
+                    focus_text += f" ; Extrait : {info['excerpt']}"
+                vigilance_highlights.append(
+                    "Étape {index} – {label} ({score}) : {focus}".format(
+                        index=info["index"],
+                        label=info["label"],
+                        score=info["score_display"],
+                        focus=focus_text,
+                    )
+                )
 
         resume_lines: list[str] = []
         if step_infos:
             resume_lines.append(
-                f"- {len(step_infos)} étape(s) analysée(s) et consolidée(s)."
+                f"- Portée : {len(step_infos)} étape(s) étudiée(s) avec consolidation des livrables."
             )
 
-            if high_quality_count:
-                best_step = max(
-                    scored_steps,
-                    key=lambda info: info["score"] if info["score"] is not None else -1.0,
-                    default=None,
-                )
-                if best_step is not None:
-                    resume_lines.append(
-                        "- Étape {index} – {label} : score {score} confirmant la solidité.".format(
-                            index=best_step["index"],
-                            label=best_step["label"],
-                            score=best_step["score_display"],
-                        )
-                    )
-
-            if scored_steps:
-                lowest_sorted = sorted(
-                    scored_steps,
-                    key=lambda info: info["score"] if info["score"] is not None else 1.1,
-                )
-                lowest_step = lowest_sorted[0]
+            if positive_highlights:
                 resume_lines.append(
-                    "- Étape {index} – {label} à renforcer (score {score}).".format(
-                        index=lowest_step["index"],
-                        label=lowest_step["label"],
-                        score=lowest_step["score_display"],
-                    )
+                    "- Points forts : "
+                    + "; ".join(positive_highlights[:2])
+                    + ("; …" if len(positive_highlights) > 2 else ".")
                 )
-                if len(lowest_sorted) > 1:
-                    second_lowest = lowest_sorted[1]
-                    resume_lines.append(
-                        "- Étape {index} – {label} nécessite un suivi (score {score}).".format(
-                            index=second_lowest["index"],
-                            label=second_lowest["label"],
-                            score=second_lowest["score_display"],
-                        )
-                    )
 
-            total_recos = sum(len(info["suggestions"]) for info in step_infos)
-            if total_recos:
+            if vigilance_highlights:
                 resume_lines.append(
-                    f"- {total_recos} recommandation(s) prioritaire(s) identifiée(s)."
+                    "- Vigilances : "
+                    + "; ".join(vigilance_highlights[:2])
+                    + ("; …" if len(vigilance_highlights) > 2 else ".")
+                )
+
+            if transcript_excerpt:
+                resume_lines.append(f"- Contenu clé : {transcript_excerpt}")
+
+            if vigilance_highlights:
+                principal_action = vigilance_highlights[0]
+                resume_lines.append(
+                    "- Actions critiques : "
+                    + principal_action
+                    + ("; autres recommandations à prioriser." if len(vigilance_highlights) > 1 else ".")
+                )
+            elif not vigilance_highlights and positive_highlights:
+                resume_lines.append(
+                    "- Actions critiques : Aucun blocage identifié, poursuivre la validation finale."
                 )
             else:
-                resume_lines.append("- Aucune recommandation urgente détectée.")
+                resume_lines.append(
+                    "- Actions critiques : Aucune analyse exploitable disponible."
+                )
         else:
             resume_lines.append("- Aucun travail exécuté n'a pu être analysé.")
 
         table_rows: list[str] = []
         for info in step_infos:
             table_rows.append(
-                "| Étape {index} – {label} | {strength} | {axis} |".format(
+                "| Étape {index} – {label} | {score} | {strength} | {axis} |".format(
                     index=info["index"],
                     label=info["label"],
+                    score=info["score_display"],
                     strength=_clean_inline_text(info["points_forts"]),
                     axis=_clean_inline_text(info["axes"]),
                 )
@@ -3394,7 +3599,7 @@ Google's Gemini Advancements..."}
         priority_entries.sort(key=lambda item: (item[0], item[1]))
 
         if not priority_entries:
-            priority_list = ["- Aucune action complémentaire suggérée."]
+            priority_list = ["- Étape 1 – priorités : Aucun suivi supplémentaire exigé."]
         else:
             priority_list = [
                 "- Étape {index} – {label} : {action}".format(
@@ -3405,6 +3610,26 @@ Google's Gemini Advancements..."}
                 for _, index, label, action_text in priority_entries
             ]
 
+        global_analysis_fragments: list[str] = []
+        if positive_highlights:
+            global_analysis_fragments.append(
+                "Les livrables solides confirment : " + "; ".join(positive_highlights[:1]) + "."
+            )
+        if vigilance_highlights:
+            global_analysis_fragments.append(
+                "Points de vigilance prioritaires : " + "; ".join(vigilance_highlights[:1]) + "."
+            )
+        if transcript_excerpt:
+            global_analysis_fragments.append(
+                f"Contenu clé : {transcript_excerpt}."
+            )
+        if not global_analysis_fragments:
+            global_analysis_fragments.append(
+                "Aucune conclusion exploitable n'a été générée faute de retours qualité."
+            )
+
+        global_analysis_line = "Analyse globale : " + " ".join(global_analysis_fragments)
+
         global_review_sections = [
             "---",
             "## Synthèse globale de la design review",
@@ -3414,11 +3639,13 @@ Google's Gemini Advancements..."}
             "",
             "Section 2 : Points forts et axes d'amélioration",
             "",
-            "| Étape | Points forts | Axes d'amélioration |",
-            "| :--- | :--- | :--- |",
-            *(table_rows if table_rows else ["| Aucune étape | — | — |"]),
+            "| Étape | Score | Points forts | Axes d'amélioration |",
+            "| :--- | :---: | :--- | :--- |",
+            *(table_rows if table_rows else ["| Aucune étape | — | — | — |"]),
             "",
             "Section 3 : Prochaines étapes prioritaires",
+            global_analysis_line,
+            "",
             *priority_list,
         ]
 
@@ -3453,6 +3680,7 @@ Google's Gemini Advancements..."}
         Execute the complete plan based on dependencies.
         Handles a special 'final_synthesis' action for templating.
         """
+        self._emitted_messages = []
         completed_results: dict[str, dict[str, str]] = {}
         in_progress: set[str] = set()
         completed: set[str] = set()
@@ -3679,6 +3907,7 @@ Google's Gemini Advancements..."}
         }
 
         plan.metadata["execution_outputs"] = all_outputs
+        plan.metadata["emitted_messages"] = list(self._emitted_messages)
         return result_message
 
     async def emit_replace_mermaid(self, plan: Plan):
@@ -3687,6 +3916,8 @@ Google's Gemini Advancements..."}
         await self.emit_replace(f"\n\n```mermaid\n{mermaid}\n```\n")
 
     async def emit_message(self, message: str):
+        cleaned = message if isinstance(message, str) else str(message)
+        self._emitted_messages.append(cleaned)
         await self.__current_event_emitter__(
             {"type": "message", "data": {"content": message}}
         )
