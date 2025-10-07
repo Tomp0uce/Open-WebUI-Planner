@@ -3421,6 +3421,7 @@ Google's Gemini Advancements..."}
 
         return "\n".join(sections).strip()
 
+
     async def review_final_deliverable(
         self,
         plan: Plan,
@@ -3435,45 +3436,23 @@ Google's Gemini Advancements..."}
             False,
         )
 
-        quality_data: dict[str, Any] = plan.metadata.get("action_quality", {})
-        if not quality_data:
-            return {
-                "primary_output": assembled_output,
-                "supporting_details": default_supporting_details,
-            }
-
-        raw_outputs: dict[str, Any] = plan.metadata.get("raw_action_outputs", {})
-        emitted_messages: list[str] = []
-        emitted_messages.extend(
-            msg
-            for msg in plan.metadata.get("emitted_messages", [])
-            if isinstance(msg, str)
-        )
-
-        internal_messages = getattr(self, "_emitted_messages", None)
-        if internal_messages:
-            emitted_messages.extend(
-                msg for msg in internal_messages if isinstance(msg, str)
-            )
-
-        aggregated_fragments: list[str] = []
-        for fragment in emitted_messages:
-            cleaned_fragment = _clean_inline_text(fragment)
-            if cleaned_fragment:
-                aggregated_fragments.append(cleaned_fragment)
-
-        assembled_clean = _clean_inline_text(assembled_output)
-        if assembled_clean:
-            aggregated_fragments.append(assembled_clean)
-
         step_actions = [
             action for action in plan.actions if action.id != "final_synthesis"
         ]
 
-        step_infos: list[dict[str, Any]] = []
-        detailed_strengths: list[str] = []
-        detailed_improvements: list[str] = []
-        detailed_next_steps: list[str] = []
+        if not step_actions:
+            return {
+                "primary_output": assembled_output,
+                "supporting_details": (
+                    f"{default_supporting_details} – Design review indisponible : aucune étape à analyser."
+                ).strip(),
+            }
+
+        quality_data = plan.metadata.get("action_quality", {}) or {}
+        raw_outputs = plan.metadata.get("raw_action_outputs", {}) or {}
+
+        step_summaries: list[dict[str, Any]] = []
+        review_context_steps: list[dict[str, Any]] = []
 
         for index, action in enumerate(step_actions, start=1):
             snapshot = quality_data.get(action.id, {}) or {}
@@ -3486,9 +3465,7 @@ Google's Gemini Advancements..."}
             )
             score_display = f"{score_value:.2f}" if score_value is not None else "N/A"
 
-            summary_text = _clean_inline_text(
-                snapshot.get("summary") or "Aucun retour qualitatif."
-            )
+            summary_text = _clean_inline_text(snapshot.get("summary", ""))
             issues = [
                 _clean_inline_text(issue)
                 for issue in snapshot.get("issues", [])
@@ -3503,295 +3480,240 @@ Google's Gemini Advancements..."}
             raw_result = raw_outputs.get(action.id, {}) or {}
             raw_primary = str(raw_result.get("primary_output", "") or "")
             raw_support = str(raw_result.get("supporting_details", "") or "")
-            step_combined = " ".join(
-                part for part in [raw_primary, raw_support] if part.strip()
-            )
-            if step_combined:
-                aggregated_fragments.append(_clean_inline_text(step_combined))
-            content_excerpt = _build_content_excerpt(step_combined)
 
-            short_label = _build_step_short_label(action.description)
-            descriptor = f"Étape {index} – {short_label}"
-            is_high_score = score_value is not None and score_value >= 0.8
-
-            if is_high_score:
-                strength_comment = summary_text or "Qualité confirmée."
-                detailed_strengths.append(f"- {descriptor} : {strength_comment}")
-            else:
-                improvement_comment = (
-                    summary_text or "Clarifier la qualité attendue."
-                )
-                detailed_improvements.append(
-                    f"- {descriptor} : {improvement_comment}"
-                )
-
-            for issue in issues:
-                detailed_improvements.append(f"  • {issue}")
-
-            if suggestions:
-                for suggestion in suggestions:
-                    detailed_next_steps.append(f"- {descriptor} : {suggestion}")
-            elif issues:
-                for issue in issues:
-                    detailed_next_steps.append(f"- {descriptor} : Résoudre : {issue}")
-
-            point_fort_parts: list[str] = []
-            if summary_text:
-                point_fort_parts.append(f"Analyse : {summary_text}")
-            elif is_high_score:
-                point_fort_parts.append("Analyse : Livrable conforme.")
-            if not point_fort_parts:
-                point_fort_parts.append("Analyse : Livrable conforme.")
-            point_fort_text = " · ".join(point_fort_parts)
-
-            axes_parts: list[str] = []
-            if issues:
-                axes_parts.append("; ".join(issues))
-            elif suggestions:
-                axes_parts.append("; ".join(suggestions))
-            elif not is_high_score:
-                axes_parts.append(
-                    "Clarifier les attentes fonctionnelles et ajouter des exemples."
-                )
-            else:
-                axes_parts.append("Surveiller la continuité de la qualité livrée.")
-            axes_text = " · ".join(
-                _clean_inline_text(part) for part in axes_parts if part.strip()
-            )
-
-            step_infos.append(
+            step_summaries.append(
                 {
                     "index": index,
-                    "label": short_label,
-                    "score": score_value,
+                    "action_id": action.id,
+                    "description": action.description,
+                    "score_value": score_value,
                     "score_display": score_display,
-                    "summary": summary_text,
+                    "quality_summary": summary_text,
                     "issues": issues,
                     "suggestions": suggestions,
-                    "excerpt": content_excerpt,
-                    "points_forts": point_fort_text,
-                    "axes": axes_text,
+                    "raw_primary": raw_primary,
+                    "raw_support": raw_support,
                 }
             )
 
-        if not detailed_strengths:
-            detailed_strengths.append(
-                "- Aucun point fort identifié automatiquement ; vérifier manuellement."
+            review_context_steps.append(
+                {
+                    "index": index,
+                    "action_id": action.id,
+                    "description": action.description,
+                    "quality_score": score_value,
+                    "quality_summary": summary_text,
+                    "issues": issues,
+                    "suggestions": suggestions,
+                    "primary_output": raw_primary,
+                    "supporting_details": raw_support,
+                }
             )
 
-        if not detailed_improvements:
-            detailed_improvements.append(
-                "- Aucun axe d'amélioration détecté à ce stade."
-            )
+        review_payload = {
+            "goal": plan.goal,
+            "steps": review_context_steps,
+        }
 
-        if not detailed_next_steps:
-            detailed_next_steps.append("- Aucune action complémentaire suggérée.")
+        json_schema = {
+            "type": "object",
+            "properties": {
+                "request_summary": {"type": "string"},
+                "work_summary": {"type": "string"},
+                "steps": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action_id": {"type": "string"},
+                            "step_overview": {"type": "string"},
+                            "strengths": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "improvements": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": ["action_id"],
+                        "additionalProperties": False,
+                    },
+                },
+                "priorities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["request_summary", "work_summary"],
+            "additionalProperties": False,
+        }
 
-        content_highlights = [
-            info.get("excerpt")
-            for info in step_infos
-            if info.get("excerpt")
+        prompt_sections = [
+            "Tu es chargé de produire une design review structurée pour un plan déjà exécuté.",
+            "Analyse toutes les étapes terminées et utilise les informations fournies pour résumer la demande initiale, le travail effectué, les points forts et les axes d'amélioration.",
+            "Respecte strictement la langue du prompt initial et réponds uniquement dans cette langue.",
+            "Pour chaque étape, rédige un intitulé très court (maximum 6 mots) qui résume le contenu livré, puis liste les points forts et axes d'amélioration les plus pertinents.",
+            "Classe les prochaines étapes prioritaires du plus important au moins important.",
+            "Ta réponse DOIT respecter strictement le schéma JSON fourni.",
         ]
-        transcript_excerpt = ""
-        if content_highlights:
-            combined_highlights = "; ".join(content_highlights[:3])
-            transcript_excerpt = _build_content_excerpt(combined_highlights, 180)
-        else:
-            aggregated_concat = " ".join(
-                fragment for fragment in aggregated_fragments if fragment
+
+        prompt_context = json.dumps(review_payload, ensure_ascii=False)
+        design_review_prompt = "\n\n".join(prompt_sections + ["Contexte:", prompt_context])
+
+        review_data: dict[str, Any] | None = None
+        try:
+            response_text = await self.get_completion(
+                prompt=design_review_prompt,
+                format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "design_review",
+                        "strict": True,
+                        "schema": json_schema,
+                    },
+                },
+                action_results={},
+                action=None,
             )
-            transcript_excerpt = _build_content_excerpt(aggregated_concat, 180)
+            cleaned = clean_json_response(response_text)
+            review_data = json.loads(cleaned)
+        except Exception as error:  # pragma: no cover - exercised in tests via fallback
+            logger.error("Design review generation failed: %s", error)
+            return {
+                "primary_output": assembled_output,
+                "supporting_details": (
+                    f"{default_supporting_details} – Design review indisponible : erreur lors de la génération (voir journaux)."
+                ).strip(),
+            }
 
-        scored_steps = [info for info in step_infos if info["score"] is not None]
-        high_quality_steps = [info for info in scored_steps if info["score"] is not None and info["score"] >= 0.8]
+        if not isinstance(review_data, dict):
+            return {
+                "primary_output": assembled_output,
+                "supporting_details": (
+                    f"{default_supporting_details} – Design review indisponible : réponse inattendue de l'IA."
+                ).strip(),
+            }
 
-        positive_highlights = []
-        for info in high_quality_steps:
-            base_summary = info["summary"] or "Livrable conforme aux attentes."
-            highlight = "Étape {index} – {label} ({score})".format(
-                index=info["index"],
-                label=info["label"],
-                score=info["score_display"],
-            )
-            if base_summary:
-                highlight += f" : {base_summary}"
-            positive_highlights.append(highlight)
+        request_summary = _clean_inline_text(review_data.get("request_summary", ""))
+        work_summary = _clean_inline_text(review_data.get("work_summary", ""))
 
-        vigilance_highlights: list[str] = []
-        for info in step_infos:
-            issues = info["issues"]
-            suggestions = info["suggestions"]
-            focus_items = issues if issues else suggestions
-            if focus_items:
-                focus_text = "; ".join(focus_items)
-                vigilance_highlights.append(
-                    "Étape {index} – {label} ({score}) : {focus}".format(
-                        index=info["index"],
-                        label=info["label"],
-                        score=info["score_display"],
-                        focus=focus_text,
-                    )
-                )
+        ai_step_feedback: dict[str, dict[str, Any]] = {}
+        for entry in review_data.get("steps", []) or []:
+            if not isinstance(entry, dict):
+                continue
+            action_id = entry.get("action_id")
+            if not isinstance(action_id, str):
+                continue
+            ai_step_feedback[action_id] = {
+                "overview": _clean_inline_text(entry.get("step_overview", "")),
+                "strengths": [
+                    _clean_inline_text(item)
+                    for item in entry.get("strengths", []) or []
+                    if isinstance(item, str) and _clean_inline_text(item)
+                ],
+                "improvements": [
+                    _clean_inline_text(item)
+                    for item in entry.get("improvements", []) or []
+                    if isinstance(item, str) and _clean_inline_text(item)
+                ],
+            }
 
-        priority_entries: list[tuple[float, int, str, str]] = []
-        for info in step_infos:
-            priority_score = info["score"] if info["score"] is not None else 1.1
-            combined_actions = info["suggestions"][:]
-            if not combined_actions and info["issues"]:
-                combined_actions = [f"Résoudre : {issue}" for issue in info["issues"]]
+        priorities = [
+            _clean_inline_text(item)
+            for item in review_data.get("priorities", []) or []
+            if isinstance(item, str) and _clean_inline_text(item)
+        ]
 
-            for action_text in combined_actions:
-                priority_entries.append(
-                    (
-                        priority_score,
-                        info["index"],
-                        info["label"],
-                        action_text,
-                    )
-                )
-
-        priority_entries.sort(key=lambda item: (item[0], item[1]))
-
-        resume_lines: list[str] = []
-        if step_infos:
-            resume_lines.append(
-                f"- Portée : {len(step_infos)} étape(s) étudiée(s) avec consolidation des livrables."
-            )
-
-            treated_line = "; ".join(
-                "Étape {index} – {label} ({score})".format(
-                    index=info["index"],
-                    label=info["label"],
-                    score=info["score_display"],
-                )
-                for info in step_infos
-            )
-            resume_lines.append(f"- Livrables traités : {treated_line}.")
-
-            if positive_highlights:
-                resume_lines.append(
-                    "- Points forts : "
-                    + "; ".join(positive_highlights[:2])
-                    + ("; …" if len(positive_highlights) > 2 else ".")
-                )
-            else:
-                resume_lines.append(
-                    "- Points forts : Aucun point fort automatique détecté."
-                )
-
-            if vigilance_highlights:
-                resume_lines.append(
-                    "- Axes de vigilance : "
-                    + "; ".join(vigilance_highlights[:2])
-                    + ("; …" if len(vigilance_highlights) > 2 else ".")
-                )
-            else:
-                resume_lines.append(
-                    "- Axes de vigilance : Aucun point critique détecté."
-                )
-
-            if priority_entries:
-                top_priority = priority_entries[0]
-                resume_lines.append(
-                    "- Actions critiques : Étape {index} – {label} : {action}.".format(
-                        index=top_priority[1],
-                        label=top_priority[2],
-                        action=_clean_inline_text(top_priority[3]),
-                    )
-                )
-            else:
-                resume_lines.append(
-                    "- Actions critiques : Aucun suivi supplémentaire exigé."
-                )
-        else:
-            resume_lines.append("- Aucun travail exécuté n'a pu être analysé.")
+        if not request_summary:
+            request_summary = _clean_inline_text(plan.goal) or "Résumé indisponible."
+        if not work_summary:
+            work_summary = "Résumé du travail indisponible."
 
         table_rows: list[str] = []
-        for info in step_infos:
+        supporting_strengths: list[str] = []
+        supporting_improvements: list[str] = []
+
+        for info in step_summaries:
+            feedback = ai_step_feedback.get(info["action_id"], {})
+            overview = feedback.get("overview") or _build_step_short_label(
+                info["description"]
+            )
+            strengths = feedback.get("strengths") or (
+                [info["quality_summary"]]
+                if info["quality_summary"]
+                else ["Aucun point fort identifié."]
+            )
+            improvements = feedback.get("improvements") or (
+                info["suggestions"]
+                if info["suggestions"]
+                else ["Aucun axe d'amélioration identifié."]
+            )
+
+            strengths_text = "; ".join(strengths)
+            improvements_text = "; ".join(improvements)
+
             table_rows.append(
-                "| Étape {index} – {label} | {score} | {strength} | {axis} |".format(
+                "| Étape {index} – {label} | {score} | {strengths} | {improvements} |".format(
                     index=info["index"],
-                    label=info["label"],
+                    label=overview,
                     score=info["score_display"],
-                    strength=_clean_inline_text(info["points_forts"]),
-                    axis=_clean_inline_text(info["axes"]),
+                    strengths=strengths_text,
+                    improvements=improvements_text,
                 )
             )
 
-        if not priority_entries:
-            priority_list = ["- Étape 1 – priorités : Aucun suivi supplémentaire exigé."]
-        else:
-            priority_list = [
-                "- Étape {index} – {label} : {action}".format(
-                    index=index,
-                    label=label,
-                    action=_clean_inline_text(action_text),
-                )
-                for _, index, label, action_text in priority_entries
+            supporting_strengths.append(
+                f"- Étape {info['index']} – {overview} : {strengths_text}"
+            )
+            supporting_improvements.append(
+                f"- Étape {info['index']} – {overview} : {improvements_text}"
+            )
+
+        if not priorities:
+            fallback_priorities = []
+            for info in step_summaries:
+                if info["suggestions"]:
+                    for suggestion in info["suggestions"]:
+                        fallback_priorities.append(
+                            f"Étape {info['index']} – {_build_step_short_label(info['description'])} : {suggestion}"
+                        )
+            priorities = fallback_priorities or [
+                "Aucune action prioritaire supplémentaire identifiée."
             ]
 
-        goal_summary = _clean_inline_text(plan.goal)
-        executed_labels = [
-            f"Étape {info['index']} – {info['label']}" for info in step_infos
-        ]
-
-        global_analysis_fragments: list[str] = []
-        if goal_summary:
-            global_analysis_fragments.append(f"Objectif initial : {goal_summary}.")
-        if executed_labels:
-            global_analysis_fragments.append(
-                "Étapes réalisées : " + ", ".join(executed_labels) + "."
-            )
-        if positive_highlights:
-            global_analysis_fragments.append(
-                "Livrables conformes : " + "; ".join(positive_highlights[:1]) + "."
-            )
-        if vigilance_highlights:
-            global_analysis_fragments.append(
-                "Axes d'amélioration identifiés : "
-                + "; ".join(vigilance_highlights[:1])
-                + "."
-            )
-        if not vigilance_highlights:
-            global_analysis_fragments.append(
-                "Axes d'amélioration identifiés : Aucun axe critique supplémentaire détecté."
-            )
-        if not global_analysis_fragments:
-            global_analysis_fragments.append(
-                "Aucune conclusion exploitable n'a été générée faute de retours qualité."
-            )
-
-        global_analysis_line = "Analyse globale : " + " ".join(global_analysis_fragments)
-
-        global_review_sections = [
+        section_lines = [
             "---",
             "## Synthèse globale de la design review",
             "",
-            "Section 1 : Résumé rapide",
-            *resume_lines[:6],
+            "Section 1 : Résumé de la demande et du travail réalisé",
+            f"- Résumé de la demande : {request_summary}",
+            f"- Résumé du travail réalisé : {work_summary}",
             "",
-            "Section 2 : Points forts et axes d'amélioration",
+            "Section 2 : Analyse détaillée par étape",
             "",
             "| Étape | Score | Points forts | Axes d'amélioration |",
             "| :--- | :---: | :--- | :--- |",
-            *(table_rows if table_rows else ["| Aucune étape | — | — | — |"]),
+            *(table_rows if table_rows else ["| Aucune étape | N/A | — | — |"]),
             "",
             "Section 3 : Prochaines étapes prioritaires",
-            global_analysis_line,
-            "",
-            *priority_list,
+            *[f"- {item}" for item in priorities],
         ]
 
         supporting_details = "\n".join(
             [
                 "### Points forts",
-                *detailed_strengths,
+                *(supporting_strengths or ["- Aucun point fort identifié."]),
                 "",
                 "### Axes d'amélioration",
-                *detailed_improvements,
+                *(supporting_improvements or ["- Aucun axe d'amélioration identifié."]),
                 "",
-                "### Prochaines étapes recommandées",
-                *detailed_next_steps,
+                "### Priorités",
+                *(
+                    [f"- {item}" for item in priorities]
+                    if priorities
+                    else ["- Aucune priorité identifiée."]
+                ),
             ]
         ).strip()
 
@@ -3799,7 +3721,7 @@ Google's Gemini Advancements..."}
             [
                 assembled_output.strip(),
                 "",
-                "\n".join(global_review_sections).strip(),
+                "\n".join(section_lines).strip(),
             ]
         ).strip()
 
@@ -3807,6 +3729,7 @@ Google's Gemini Advancements..."}
             "primary_output": primary_output,
             "supporting_details": supporting_details,
         }
+
 
     async def execute_plan(self, plan: Plan) -> None:
         """

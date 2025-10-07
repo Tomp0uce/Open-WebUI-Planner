@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from pathlib import Path
 import sys
@@ -18,6 +19,85 @@ class FinalSynthesisRenderingPipe(Pipe):
         self.__current_event_emitter__ = self._capture_event  # type: ignore[assignment]
         self.__current_event_call__ = self._noop_event_call  # type: ignore[assignment]
         self.valves.SHOW_ACTION_SUMMARIES = False
+
+    async def get_completion(  # type: ignore[override]
+        self,
+        prompt,
+        model: str | dict[str, object] = "",
+        tools: dict[str, dict[object, object]] | None = None,
+        format: dict[str, object] | None = None,
+        action_results: dict[str, dict[str, str]] | None = None,
+        action=None,
+    ) -> str:
+        if not isinstance(prompt, str):
+            raise AssertionError("Unexpected non-string prompt for design review")
+
+        context_payload: dict[str, object] = {}
+        if "Contexte:" in prompt:
+            _, context_block = prompt.split("Contexte:\n", 1)
+            try:
+                context_payload = json.loads(context_block)
+            except json.JSONDecodeError as exc:  # pragma: no cover - defensive guard
+                raise AssertionError(f"Invalid context payload: {exc}") from exc
+
+        goal_text = str(context_payload.get("goal", "")) if context_payload else ""
+        steps_payload = context_payload.get("steps", []) if isinstance(context_payload, dict) else []
+
+        steps_response: list[dict[str, object]] = []
+        priorities: list[str] = []
+
+        if isinstance(steps_payload, list):
+            for index, entry in enumerate(steps_payload, start=1):
+                if not isinstance(entry, dict):
+                    continue
+                description = str(entry.get("description", "")).strip()
+                action_id = str(entry.get("action_id", "")).strip()
+                quality_summary = str(entry.get("quality_summary", "")).strip()
+
+                suggestions = [
+                    str(item).strip()
+                    for item in (entry.get("suggestions") or [])
+                    if str(item).strip()
+                ]
+                issues = [
+                    str(item).strip()
+                    for item in (entry.get("issues") or [])
+                    if str(item).strip()
+                ]
+
+                overview = description or f"Étape {index}"
+                strengths = [quality_summary] if quality_summary else ["Livrable conforme."]
+                improvements = (
+                    suggestions + issues
+                    if suggestions
+                    else (issues or ["Aucun axe d'amélioration identifié."])
+                )
+
+                if suggestions:
+                    priorities.append(
+                        f"Étape {index} – {overview} : {suggestions[0]}"
+                    )
+
+                steps_response.append(
+                    {
+                        "action_id": action_id,
+                        "step_overview": overview,
+                        "strengths": strengths,
+                        "improvements": improvements,
+                    }
+                )
+
+        if not priorities:
+            priorities.append("Maintenir la qualité actuelle.")
+
+        return json.dumps(
+            {
+                "request_summary": goal_text or "Synthèse du dispositif OptiScan.",
+                "work_summary": "Les livrables des étapes ont été analysés et résumés.",
+                "steps": steps_response,
+                "priorities": priorities,
+            }
+        )
 
     async def _capture_event(self, event: dict[str, Any]) -> None:
         if event["type"] == "message":
@@ -130,7 +210,7 @@ def test_final_synthesis_outputs_step_summaries_and_review() -> None:
     assert "Draft the executive summary" in review_output
     assert "### Axes d'amélioration" in review_output
     assert "Ajouter un objectif sur la scalabilité." in review_output
-    assert "### Prochaines étapes recommandées" in review_output
+    assert "### Priorités" in review_output
     assert "Clarifier les métriques d'impact attendues." in review_output
     assert "```sql\nSELECT * FROM roadmap WHERE priority = 'high';\n```" not in review_output
 

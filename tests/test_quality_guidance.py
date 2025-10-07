@@ -60,7 +60,7 @@ class StubPipe(Pipe):
             and isinstance(format, dict)
             and format.get("json_schema", {})
             and isinstance(format["json_schema"], dict)
-            and format["json_schema"].get("name") == "final_deliverable_review"
+            and format["json_schema"].get("name") in {"final_deliverable_review", "design_review"}
         ):
             self.final_review_prompts.append(prompt)  # type: ignore[arg-type]
             return self.final_review_responses.pop(0)
@@ -321,8 +321,19 @@ def test_final_deliverable_review_applies_enhanced_output() -> None:
     pipe.final_review_responses = [
         json.dumps(
             {
-                "primary_output": "# Refined Report\n\n## Background\nBackground findings\n",
-                "supporting_details": "- Reorganized sections for clarity",
+                "request_summary": "Livrer un rapport détaillé.",
+                "work_summary": "Une étape de recherche a été compilée et évaluée.",
+                "steps": [
+                    {
+                        "action_id": "research",
+                        "step_overview": "Recherche de fond",
+                        "strengths": ["Background findings"],
+                        "improvements": ["Ajouter des sources secondaires."],
+                    }
+                ],
+                "priorities": [
+                    "Étape 1 – Recherche de fond : Ajouter des sources secondaires."
+                ],
             }
         ),
     ]
@@ -343,4 +354,4 @@ def test_final_deliverable_review_applies_enhanced_output() -> None:
     supporting = final_action_output["supporting_details"]
     assert "### Points forts" in supporting
     assert "### Axes d'amélioration" in supporting
-    assert "### Prochaines étapes recommandées" in supporting
+    assert "### Priorités" in supporting
