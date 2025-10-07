@@ -53,7 +53,8 @@ This powerful agent autonomously generates and executes multi-step plans to achi
 
 - **Stepwise Results:** Each completed action is reported in order with its Mermaid step name, quality score, evaluator comments, and the generated output. Supporting details remain available in collapsible sections when provided.
 - **Preserved Raw Outputs:** The final synthesis embeds the exact raw outputs from each step—no additional LLM post-processing—ensuring the deliverables remain identical to their original generation.
-- **Review-Only Finale:** The closing review action now delivers a strengths/weaknesses/next-steps analysis for the collected outputs without modifying the deliverables themselves, using the preassembled stepwise summary strictly as read-only context.
+- **Design Review Finale:** The last planner step triggers a dedicated design review LLM call that receives the original user request plus every step outcome. The response is rendered in three sections: (1) request summary & work summary, (2) per-step analysis table with scores, strengths, and improvement areas, and (3) prioritized follow-up actions. The design review must not alter the original deliverables, and the generated review mirrors the language of the initial prompt unless asked otherwise in the initial user prompt.
+- **Review Rollback Safety:** If the design review call fails (e.g., context length overflow), the planner returns only the concatenated step outputs and annotates the supporting details to signal that the review is unavailable instead of emitting a partial analysis.
 
 **Testing:**
 

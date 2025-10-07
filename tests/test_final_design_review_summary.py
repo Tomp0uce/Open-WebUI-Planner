@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from __future__ import annotations
+
 import asyncio
+import json
 from pathlib import Path
 import sys
+from typing import Any
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -10,125 +14,147 @@ from planner import Action, Plan, Pipe
 
 
 class ReviewPipe(Pipe):
-    def __init__(self) -> None:
+    def __init__(self, ai_payload: Any) -> None:
         super().__init__()
+        self._ai_payload = ai_payload
+        self.calls = 0
+        self.captured_prompt: str | None = None
+        self.captured_format: Any = None
 
     async def emit_status(self, level: str, message: str, done: bool):  # type: ignore[override]
         return None
 
+    async def get_completion(  # type: ignore[override]
+        self,
+        prompt: str,
+        format: Any | None = None,
+        action_results: dict[str, Any] | None = None,
+        action: Action | None = None,
+    ) -> str:
+        self.calls += 1
+        self.captured_prompt = prompt
+        self.captured_format = format
+        if isinstance(self._ai_payload, Exception):
+            raise self._ai_payload
+        return json.dumps(self._ai_payload)
 
-async def _run_review(plan: Plan, assembled_output: str) -> dict[str, str]:
-    pipe = ReviewPipe()
-    return await pipe.review_final_deliverable(plan, assembled_output)
 
-
-def test_final_review_appends_global_summary() -> None:
+def _build_plan() -> Plan:
     plan = Plan(
-        goal="Valider le livrable",
+        goal="Générer cinq prompts illustratifs pour différents animaux.",
         actions=[
-            Action(id="etape1", type="text", description="Analyse initiale"),
-            Action(id="etape2", type="text", description="Prototype fonctionnel"),
+            Action(id="etape1", type="text", description="Lister cinq animaux distincts"),
+            Action(id="etape2", type="text", description="Produire des prompts détaillés"),
             Action(id="final_synthesis", type="text", description="{{etape1}}\n{{etape2}}"),
         ],
     )
 
     plan.metadata.setdefault("action_quality", {})["etape1"] = {
-        "quality_score": 0.9,
-        "summary": "Travail très abouti.",
-        "issues": ["Vérifier la cohérence des données."],
-        "suggestions": ["Documenter les hypothèses clés."],
+        "quality_score": 0.95,
+        "summary": "Liste cohérente et pertinente.",
+        "issues": [],
+        "suggestions": ["Ajouter plus de diversité géographique."],
     }
     plan.metadata.setdefault("action_quality", {})["etape2"] = {
-        "quality_score": 0.6,
-        "summary": "Résultat partiel nécessitant des retouches.",
-        "issues": ["Compléter les tests unitaires."],
-        "suggestions": ["Planifier une session de relecture croisée."],
+        "quality_score": 0.95,
+        "summary": "Prompts riches en détails.",
+        "issues": [],
+        "suggestions": ["Introduire des animaux moins communs."],
     }
 
     plan.metadata.setdefault("raw_action_outputs", {})["etape1"] = {
-        "primary_output": "Livrable de l'étape 1 : rapport détaillé.",
-        "supporting_details": "Synthèse et analyse des données.",
+        "primary_output": "Lion\nChimpanzé\nColibri\nDauphin\nKangourou",
+        "supporting_details": "Animaux sélectionnés",
     }
     plan.metadata.setdefault("raw_action_outputs", {})["etape2"] = {
-        "primary_output": "Livrable de l'étape 2 : prototype fonctionnel.",
-        "supporting_details": "Tests manquants sur les cas limites.",
+        "primary_output": "Prompts créatifs pour chaque animal.",
+        "supporting_details": "Descriptions immersives.",
     }
 
-    pipe = ReviewPipe()
+    return plan
+
+
+def test_design_review_uses_ai_sections() -> None:
+    ai_response = {
+        "request_summary": "Créer cinq prompts d'illustration couvrant différents animaux.",
+        "work_summary": "Deux étapes ont fourni une liste d'animaux et des descriptions immersives pour chaque prompt.",
+        "steps": [
+            {
+                "action_id": "etape1",
+                "step_overview": "Sélection de cinq espèces variées",
+                "strengths": ["Animaux emblématiques clairement listés."],
+                "improvements": ["Explorer des espèces plus inattendues."],
+            },
+            {
+                "action_id": "etape2",
+                "step_overview": "Prompts descriptifs pour chaque animal",
+                "strengths": ["Descriptions vivantes adaptées à la génération d'images."],
+                "improvements": ["Souligner davantage la diversité géographique."],
+            },
+        ],
+        "priorities": [
+            "Introduire des animaux moins courants pour enrichir la variété des prompts.",
+            "Ajouter des contextes géographiques plus contrastés dans les descriptions.",
+        ],
+    }
+
+    pipe = ReviewPipe(ai_payload=ai_response)
+    plan = _build_plan()
 
     completed_results = {
-        "etape1": {"primary_output": "Livrable de l'étape 1"},
-        "etape2": {"primary_output": "Livrable de l'étape 2"},
+        "etape1": {"primary_output": "Lion\nChimpanzé\nColibri\nDauphin\nKangourou"},
+        "etape2": {"primary_output": "Prompts immersifs détaillés"},
     }
 
-    assembled_output = pipe._build_stepwise_execution_summary(
-        plan, completed_results
-    )
+    assembled_output = pipe._build_stepwise_execution_summary(plan, completed_results)
 
-    result = asyncio.run(_run_review(plan, assembled_output))
+    result = asyncio.run(pipe.review_final_deliverable(plan, assembled_output))
+
+    assert pipe.calls == 1
+    assert pipe.captured_prompt is not None
 
     primary_output = result["primary_output"]
-
     assert primary_output.startswith(assembled_output)
     assert "## Synthèse globale de la design review" in primary_output
-
-    global_section = primary_output.split("## Synthèse globale de la design review", maxsplit=1)[
-        1
-    ]
-
-    assert "Section 1 : Résumé rapide" in global_section
-    section1_content = global_section.split("Section 2 :", maxsplit=1)[0]
-    summary_lines = [
-        line.strip()
-        for line in section1_content.splitlines()
-        if line.strip().startswith("-")
-    ]
-    assert any("Portée" in line for line in summary_lines)
-    assert any(
-        "Livrables traités" in line
-        and "Étape 1 – Analyse initiale" in line
-        and "Étape 2 – Prototype fonctionnel" in line
-        for line in summary_lines
-    )
-    assert any("Points forts" in line for line in summary_lines)
-    assert any("Axes de vigilance" in line for line in summary_lines)
+    assert "Section 1 : Résumé de la demande et du travail réalisé" in primary_output
+    assert "- Résumé de la demande : Créer cinq prompts d'illustration" in primary_output
+    assert "- Résumé du travail réalisé : Deux étapes ont fourni" in primary_output
 
     table_header = "| Étape | Score | Points forts | Axes d'amélioration |"
-    assert table_header in global_section
+    assert table_header in primary_output
+    assert "Étape 1 – Sélection de cinq espèces variées" in primary_output
+    assert "Animaux emblématiques clairement listés." in primary_output
+    assert "Explorer des espèces plus inattendues." in primary_output
+    assert "Étape 2 – Prompts descriptifs pour chaque animal" in primary_output
+    assert "Descriptions vivantes adaptées à la génération d'images." in primary_output
+    assert "| 0.95 |" in primary_output
 
-    table_rows = [
-        line
-        for line in global_section.splitlines()
-        if line.startswith("| Étape") and "Points" not in line
-    ]
-    assert table_rows, "La table doit contenir au moins une ligne d'étape."
-
-    for row in table_rows:
-        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
-        assert len(cells) == 4
-        step_label = cells[0]
-        assert step_label.startswith("Étape ")
-        assert "–" in step_label
-        summary_text = step_label.split("–", maxsplit=1)[1].strip()
-        summary_words = summary_text.split()
-        assert 2 <= len(summary_words) <= 6
-        assert summary_words[-1].lower() not in {"un", "une", "des", "pour", "avec"}
-        score_cell = cells[1]
-        assert score_cell.replace(",", ".").replace(" ", "").startswith("0.") or score_cell in {"0,60", "0,90"}
-        assert "Contenu :" not in cells[2]
-        assert "Contenu :" not in cells[3]
-        assert "rapport détaillé" not in cells[2]
-        assert "rapport détaillé" not in cells[3]
-
-    assert "Section 3 : Prochaines étapes prioritaires" in global_section
-    section3_content = global_section.split("Section 3 : Prochaines étapes prioritaires", maxsplit=1)[
-        1
-    ]
-    section3_lines = [line for line in section3_content.splitlines() if line.strip()]
-    assert section3_lines[0].startswith("Analyse globale"), (
-        "La section 3 doit commencer par une analyse globale du contenu."
+    assert "Section 3 : Prochaines étapes prioritaires" in primary_output
+    assert (
+        "- Introduire des animaux moins courants pour enrichir la variété des prompts." in primary_output
     )
-    assert "Objectif" in section3_lines[0]
-    assert "Analyse initiale" in section3_lines[0]
-    next_steps_lines = [line for line in section3_lines if line.strip().startswith("- Étape")]
-    assert next_steps_lines, "Les prochaines étapes doivent être listées sous forme de puces."
+    assert (
+        "- Ajouter des contextes géographiques plus contrastés dans les descriptions." in primary_output
+    )
+
+    supporting_details = result["supporting_details"]
+    assert "Points forts" in supporting_details
+    assert "Axes d'amélioration" in supporting_details
+
+
+def test_design_review_rollback_when_ai_fails() -> None:
+    pipe = ReviewPipe(ai_payload=RuntimeError("token limit exceeded"))
+    plan = _build_plan()
+
+    completed_results = {
+        "etape1": {"primary_output": "Lion\nChimpanzé\nColibri\nDauphin\nKangourou"},
+        "etape2": {"primary_output": "Prompts immersifs détaillés"},
+    }
+
+    assembled_output = pipe._build_stepwise_execution_summary(plan, completed_results)
+
+    result = asyncio.run(pipe.review_final_deliverable(plan, assembled_output))
+
+    assert result["primary_output"] == assembled_output
+    assert "Synthèse globale de la design review" not in result["primary_output"]
+    assert "Design review indisponible" in result["supporting_details"]
