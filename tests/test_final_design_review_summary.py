@@ -142,6 +142,72 @@ def test_design_review_uses_ai_sections() -> None:
     assert "Axes d'amélioration" in supporting_details
 
 
+def test_design_review_prompt_includes_step_prompts() -> None:
+    ai_response = {
+        "request_summary": "Résumé factice.",
+        "work_summary": "Travail factice.",
+        "steps": [],
+    }
+
+    pipe = ReviewPipe(ai_payload=ai_response)
+    plan = _build_plan()
+
+    plan.metadata.setdefault("action_execution_prompts", {})["etape1"] = (
+        "Execute step 1: Lister cinq animaux distincts"
+    )
+    plan.metadata.setdefault("action_execution_prompts", {})["etape2"] = (
+        "Execute step 2: Produire des prompts détaillés"
+    )
+
+    completed_results = {
+        "etape1": {"primary_output": "Lion\nChimpanzé"},
+        "etape2": {"primary_output": "Prompts immersifs"},
+    }
+
+    assembled_output = pipe._build_stepwise_execution_summary(plan, completed_results)
+    asyncio.run(pipe.review_final_deliverable(plan, assembled_output))
+
+    assert pipe.captured_prompt is not None
+    assert "Contexte:\n" in pipe.captured_prompt
+
+    _, context_block = pipe.captured_prompt.split("Contexte:\n", 1)
+    payload = json.loads(context_block)
+
+    assert "steps" in payload
+    prompts = {step["action_id"]: step["step_prompt"] for step in payload["steps"]}
+    assert prompts["etape1"].startswith("Execute step 1")
+    assert prompts["etape2"].startswith("Execute step 2")
+
+
+def test_design_review_prompt_excludes_quality_only_fields() -> None:
+    ai_response = {
+        "request_summary": "Résumé factice.",
+        "work_summary": "Travail factice.",
+        "steps": [],
+    }
+
+    pipe = ReviewPipe(ai_payload=ai_response)
+    plan = _build_plan()
+
+    completed_results = {
+        "etape1": {"primary_output": "Lion\nChimpanzé"},
+        "etape2": {"primary_output": "Prompts immersifs"},
+    }
+
+    assembled_output = pipe._build_stepwise_execution_summary(plan, completed_results)
+    asyncio.run(pipe.review_final_deliverable(plan, assembled_output))
+
+    assert pipe.captured_prompt is not None
+    assert "Analyse la qualité par rapport au prompt initial" in pipe.captured_prompt
+
+    _, context_block = pipe.captured_prompt.split("Contexte:\n", 1)
+    payload = json.loads(context_block)
+
+    for step in payload["steps"]:
+        assert "quality_summary" not in step
+        assert "issues" not in step
+        assert "suggestions" not in step
+
 def test_design_review_rollback_when_ai_fails() -> None:
     pipe = ReviewPipe(ai_payload=RuntimeError("token limit exceeded"))
     plan = _build_plan()

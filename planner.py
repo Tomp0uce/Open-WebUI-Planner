@@ -2803,6 +2803,7 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
         best_output = None
         best_reflection = None
         best_quality_score = -1
+        best_prompt: str | None = None
         previous_reflection: ReflectionResult | None = None
         previous_tool_calls: list[str] = []
         while attempts_remaining >= 0:
@@ -2958,6 +2959,7 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                     best_output = current_output
                     best_reflection = current_reflection
                     best_quality_score = current_reflection.quality_score
+                    best_prompt = attempt_prompt
 
                 if current_reflection.is_successful:
                     break
@@ -3033,6 +3035,12 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
         self._store_action_quality_snapshot(plan, action, best_reflection)
         raw_outputs = plan.metadata.setdefault("raw_action_outputs", {})
         raw_outputs[action.id] = copy.deepcopy(best_output)
+
+        if best_prompt is not None:
+            execution_prompts = plan.metadata.setdefault(
+                "action_execution_prompts", {}
+            )
+            execution_prompts[action.id] = best_prompt
 
         if not best_reflection.is_successful:
             action.status = "warning"
@@ -3450,6 +3458,7 @@ Google's Gemini Advancements..."}
 
         quality_data = plan.metadata.get("action_quality", {}) or {}
         raw_outputs = plan.metadata.get("raw_action_outputs", {}) or {}
+        action_prompts = plan.metadata.get("action_execution_prompts", {}) or {}
 
         step_summaries: list[dict[str, Any]] = []
         review_context_steps: list[dict[str, Any]] = []
@@ -3465,21 +3474,10 @@ Google's Gemini Advancements..."}
             )
             score_display = f"{score_value:.2f}" if score_value is not None else "N/A"
 
-            summary_text = _clean_inline_text(snapshot.get("summary", ""))
-            issues = [
-                _clean_inline_text(issue)
-                for issue in snapshot.get("issues", [])
-                if isinstance(issue, str) and _clean_inline_text(issue)
-            ]
-            suggestions = [
-                _clean_inline_text(suggestion)
-                for suggestion in snapshot.get("suggestions", [])
-                if isinstance(suggestion, str) and _clean_inline_text(suggestion)
-            ]
-
             raw_result = raw_outputs.get(action.id, {}) or {}
             raw_primary = str(raw_result.get("primary_output", "") or "")
             raw_support = str(raw_result.get("supporting_details", "") or "")
+            step_prompt = str(action_prompts.get(action.id, "") or "")
 
             step_summaries.append(
                 {
@@ -3488,11 +3486,9 @@ Google's Gemini Advancements..."}
                     "description": action.description,
                     "score_value": score_value,
                     "score_display": score_display,
-                    "quality_summary": summary_text,
-                    "issues": issues,
-                    "suggestions": suggestions,
                     "raw_primary": raw_primary,
                     "raw_support": raw_support,
+                    "step_prompt": step_prompt,
                 }
             )
 
@@ -3502,9 +3498,7 @@ Google's Gemini Advancements..."}
                     "action_id": action.id,
                     "description": action.description,
                     "quality_score": score_value,
-                    "quality_summary": summary_text,
-                    "issues": issues,
-                    "suggestions": suggestions,
+                    "step_prompt": step_prompt,
                     "primary_output": raw_primary,
                     "supporting_details": raw_support,
                 }
@@ -3552,6 +3546,7 @@ Google's Gemini Advancements..."}
         prompt_sections = [
             "Tu es chargé de produire une design review structurée pour un plan déjà exécuté.",
             "Analyse toutes les étapes terminées et utilise les informations fournies pour résumer la demande initiale, le travail effectué, les points forts et les axes d'amélioration.",
+            "Analyse la qualité par rapport au prompt initial et à chaque prompt d'étape fourni dans le contexte. Ignore tout diagnostic automatique précédent.",
             "Respecte strictement la langue du prompt initial et réponds uniquement dans cette langue.",
             "Pour chaque étape, rédige un intitulé très court (maximum 6 mots) qui résume le contenu livré, puis liste les points forts et axes d'amélioration les plus pertinents.",
             "Classe les prochaines étapes prioritaires du plus important au moins important.",
@@ -3639,16 +3634,15 @@ Google's Gemini Advancements..."}
             overview = feedback.get("overview") or _build_step_short_label(
                 info["description"]
             )
-            strengths = feedback.get("strengths") or (
-                [info["quality_summary"]]
-                if info["quality_summary"]
-                else ["Aucun point fort identifié."]
-            )
-            improvements = feedback.get("improvements") or (
-                info["suggestions"]
-                if info["suggestions"]
-                else ["Aucun axe d'amélioration identifié."]
-            )
+            strengths = feedback.get("strengths") or [
+                _clean_inline_text(
+                    (info["raw_primary"].splitlines() or ["Contenu indisponible"])[0]
+                )
+                or "Livrable fourni sans analyse détaillée."
+            ]
+            improvements = feedback.get("improvements") or [
+                "Vérifier la conformité du livrable avec le prompt de l'étape."
+            ]
 
             strengths_text = "; ".join(strengths)
             improvements_text = "; ".join(improvements)
@@ -3673,14 +3667,20 @@ Google's Gemini Advancements..."}
         if not priorities:
             fallback_priorities = []
             for info in step_summaries:
-                if info["suggestions"]:
-                    for suggestion in info["suggestions"]:
+                feedback = ai_step_feedback.get(info["action_id"], {})
+                label = feedback.get("overview") or _build_step_short_label(
+                    info["description"]
+                )
+                for suggestion in feedback.get("improvements", []) or []:
+                    if suggestion:
                         fallback_priorities.append(
-                            f"Étape {info['index']} – {_build_step_short_label(info['description'])} : {suggestion}"
+                            f"Étape {info['index']} – {label} : {suggestion}"
                         )
-            priorities = fallback_priorities or [
-                "Aucune action prioritaire supplémentaire identifiée."
-            ]
+            if not fallback_priorities:
+                fallback_priorities.append(
+                    "Réévaluer chaque livrable en le comparant à son prompt afin d'identifier les prochaines étapes."
+                )
+            priorities = fallback_priorities
 
         section_lines = [
             "---",
