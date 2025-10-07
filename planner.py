@@ -933,7 +933,8 @@ WORKING GUIDELINES:
         return textwrap.dedent(
             """
             LANGUAGE CONSISTENCY:
-            - Unless the overall goal or this step explicitly requires another language, respond entirely in the same language as the user's request and step description.
+            - Match the language of the initial user prompt unless that prompt explicitly instructs you to respond in another language.
+            - If the user specifies a response language, follow that instruction exactly.
             - Do not mix multiple languages within the same response.
 
             FORMATTING STANDARD:

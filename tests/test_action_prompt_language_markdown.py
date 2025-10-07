@@ -35,7 +35,8 @@ def test_action_prompt_enforces_language_and_markdown() -> None:
     )
 
     assert "LANGUAGE CONSISTENCY" in prompt
-    assert "same language" in prompt
+    assert "Match the language of the initial user prompt" in prompt
+    assert "If the user specifies a response language" in prompt
     assert "Format the whole response using Markdown" in prompt
 
     lightweight_prompt = pipe._build_lightweight_prompt(
@@ -48,4 +49,5 @@ def test_action_prompt_enforces_language_and_markdown() -> None:
     )
 
     assert "LANGUAGE CONSISTENCY" in lightweight_prompt
+    assert "Match the language of the initial user prompt" in lightweight_prompt
     assert "Markdown" in lightweight_prompt
