@@ -78,9 +78,20 @@ def test_final_review_appends_global_summary() -> None:
 
     assert "Section 1 : Résumé rapide" in global_section
     section1_content = global_section.split("Section 2 :", maxsplit=1)[0]
-    assert "Travail très abouti" in section1_content
-    assert "Compléter les tests unitaires" in section1_content
-    assert "rapport détaillé" in section1_content
+    summary_lines = [
+        line.strip()
+        for line in section1_content.splitlines()
+        if line.strip().startswith("-")
+    ]
+    assert any("Portée" in line for line in summary_lines)
+    assert any(
+        "Livrables traités" in line
+        and "Étape 1 – Analyse initiale" in line
+        and "Étape 2 – Prototype fonctionnel" in line
+        for line in summary_lines
+    )
+    assert any("Points forts" in line for line in summary_lines)
+    assert any("Axes de vigilance" in line for line in summary_lines)
 
     table_header = "| Étape | Score | Points forts | Axes d'amélioration |"
     assert table_header in global_section
@@ -98,20 +109,16 @@ def test_final_review_appends_global_summary() -> None:
         step_label = cells[0]
         assert step_label.startswith("Étape ")
         assert "–" in step_label
-        summary_words = step_label.split("–", maxsplit=1)[1].strip().split()
-        assert 1 <= len(summary_words) <= 4
+        summary_text = step_label.split("–", maxsplit=1)[1].strip()
+        summary_words = summary_text.split()
+        assert 2 <= len(summary_words) <= 6
+        assert summary_words[-1].lower() not in {"un", "une", "des", "pour", "avec"}
         score_cell = cells[1]
         assert score_cell.replace(",", ".").replace(" ", "").startswith("0.") or score_cell in {"0,60", "0,90"}
-        assert (
-            "Travail très abouti" in cells[2]
-            or "Résultat partiel" in cells[2]
-            or "rapport détaillé" in cells[2]
-        )
-        assert (
-            "Vérifier la cohérence" in cells[3]
-            or "Compléter les tests unitaires" in cells[3]
-            or "Tests manquants" in cells[3]
-        )
+        assert "Contenu :" not in cells[2]
+        assert "Contenu :" not in cells[3]
+        assert "rapport détaillé" not in cells[2]
+        assert "rapport détaillé" not in cells[3]
 
     assert "Section 3 : Prochaines étapes prioritaires" in global_section
     section3_content = global_section.split("Section 3 : Prochaines étapes prioritaires", maxsplit=1)[
@@ -121,6 +128,7 @@ def test_final_review_appends_global_summary() -> None:
     assert section3_lines[0].startswith("Analyse globale"), (
         "La section 3 doit commencer par une analyse globale du contenu."
     )
-    assert "prototype fonctionnel" in section3_lines[0]
+    assert "Objectif" in section3_lines[0]
+    assert "Analyse initiale" in section3_lines[0]
     next_steps_lines = [line for line in section3_lines if line.strip().startswith("- Étape")]
     assert next_steps_lines, "Les prochaines étapes doivent être listées sous forme de puces."

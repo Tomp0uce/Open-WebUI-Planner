@@ -258,8 +258,49 @@ def _clean_inline_text(value: str) -> str:
     return cleaned
 
 
+_SHORT_LABEL_STOPWORDS = {
+    "un",
+    "une",
+    "des",
+    "le",
+    "la",
+    "les",
+    "du",
+    "de",
+    "d",
+    "pour",
+    "avec",
+    "with",
+    "for",
+    "including",
+    "featuring",
+    "about",
+    "covering",
+    "mentionnant",
+    "and",
+    "the",
+    "a",
+    "an",
+    "of",
+    "to",
+    "in",
+    "sur",
+    "dans",
+    "par",
+    "au",
+    "aux",
+    "en",
+    "et",
+    "on",
+    "into",
+    "vers",
+}
+
+_PROMPT_FOCUS_KEYWORDS = {"prompt", "prompts"}
+
+
 def _build_step_short_label(description: str) -> str:
-    """Return a 3-4 word summary label for a step description."""
+    """Return a concise label emphasizing the actionable subject of the step."""
 
     normalized = _clean_inline_text(description)
     if not normalized:
@@ -269,21 +310,57 @@ def _build_step_short_label(description: str) -> str:
         tokens = [re.sub(r"^[^\wÀ-ÿ]+|[^\wÀ-ÿ]+$", "", token) for token in raw_tokens]
         tokens = [token for token in tokens if token]
 
-    max_words = 4
-    min_words = 1
-    short_tokens = tokens[:max_words]
-    fallback_cycle = ["suivi", "priorités", "focus", "actions"]
+    max_words = 5
+    min_words = 2
 
-    while len(short_tokens) < min_words:
-        if fallback_cycle:
-            short_tokens.append(fallback_cycle.pop(0))
-        elif tokens:
-            short_tokens.append(tokens[-1])
-        else:
-            short_tokens.append("priorités")
+    def is_stopword(token: str) -> bool:
+        return token.lower() in _SHORT_LABEL_STOPWORDS
+
+    def build_prompt_focus(tokens: list[str]) -> list[str]:
+        prompt_max_words = 3
+        for index, token in enumerate(tokens):
+            if token.lower() in _PROMPT_FOCUS_KEYWORDS:
+                label_tokens = ["Prompt"]
+                for follower in tokens[index + 1 :]:
+                    if is_stopword(follower):
+                        continue
+                    label_tokens.append(follower)
+                    if len(label_tokens) >= prompt_max_words:
+                        break
+                if len(label_tokens) > 1:
+                    return label_tokens
+        return []
+
+    short_tokens = build_prompt_focus(tokens)
+
+    if not short_tokens:
+        short_tokens = []
+        for token in tokens:
+            if not short_tokens and is_stopword(token):
+                continue
+            short_tokens.append(token)
+            if len(short_tokens) >= max_words:
+                break
+
+    while len(short_tokens) > min_words and short_tokens and is_stopword(short_tokens[-1]):
+        short_tokens.pop()
+
+    if not short_tokens:
+        short_tokens = ["priorités"]
+
+    if len(short_tokens) < min_words:
+        fallback_cycle = ["suivi", "priorités", "focus", "actions"]
+        while len(short_tokens) < min_words:
+            if fallback_cycle:
+                short_tokens.append(fallback_cycle.pop(0))
+            else:
+                short_tokens.append("priorités")
 
     if len(short_tokens) > max_words:
         short_tokens = short_tokens[:max_words]
+
+    if short_tokens and short_tokens[0].lower() == "prompt":
+        short_tokens[0] = "Prompt"
 
     return " ".join(short_tokens)
 
@@ -850,6 +927,50 @@ WORKING GUIDELINES:
             "usage_note": usage_note,
         }
 
+    def _build_language_markdown_guidance(self) -> str:
+        """Provide formatting and language consistency requirements for action prompts."""
+
+        return textwrap.dedent(
+            """
+            LANGUAGE CONSISTENCY:
+            - Unless the overall goal or this step explicitly requires another language, respond entirely in the same language as the user's request and step description.
+            - Do not mix multiple languages within the same response.
+
+            FORMATTING STANDARD:
+            - Format the whole response using Markdown only. Avoid alternative markup unless the user explicitly requests a different format.
+            """
+        ).strip()
+
+    def _build_full_context_prompt(
+        self,
+        plan: Plan,
+        action: Action,
+        step_number: int,
+        context_for_prompt: dict[str, Any],
+        requirements: str,
+        user_guidance_text: str,
+    ) -> str:
+        """Construct the standard execution prompt when full context is available."""
+
+        base_prompt = textwrap.dedent(
+            f"""
+            Execute step {step_number}: {action.description}
+            Overall Goal: {plan.goal}
+
+            Context from dependent steps:
+            - Parameters: {json.dumps(action.params)}
+            - Previous Results: {json.dumps(context_for_prompt)}
+
+            {requirements}
+            {user_guidance_text}
+
+            Focus ONLY on this specific step's output.
+            """
+        ).strip()
+
+        guidance = self._build_language_markdown_guidance()
+        return "\n\n".join([base_prompt, guidance]).strip()
+
     def _build_lightweight_prompt(
         self,
         plan: Plan,
@@ -928,7 +1049,8 @@ WORKING GUIDELINES:
                 """
             ).strip()
 
-        prompt_sections = [base_intro, access_lines, metadata_block, reminders]
+        guidance = self._build_language_markdown_guidance()
+        prompt_sections = [base_intro, access_lines, metadata_block, reminders, guidance]
         return "\n\n".join(section for section in prompt_sections if section)
 
     def _build_retry_guidance(
@@ -2666,19 +2788,14 @@ Return ONLY "YES" if the action should use lightweight context, or "NO" if it sh
                 user_guidance_text,
             )
         else:
-            base_prompt = f"""
-Execute step {step_number}: {action.description}
-Overall Goal: {plan.goal}
-
-Context from dependent steps:
-- Parameters: {json.dumps(action.params)}
-- Previous Results: {json.dumps(context_for_prompt)}
-
-{requirements}
-{user_guidance_text}
-
-Focus ONLY on this specific step's output.
-"""
+            base_prompt = self._build_full_context_prompt(
+                plan,
+                action,
+                step_number,
+                context_for_prompt,
+                requirements,
+                user_guidance_text,
+            )
 
         base_prompt_template = base_prompt
         attempts_remaining = self.valves.MAX_RETRIES
@@ -3398,15 +3515,11 @@ Google's Gemini Advancements..."}
 
             if is_high_score:
                 strength_comment = summary_text or "Qualité confirmée."
-                if content_excerpt:
-                    strength_comment += f" (Extrait : {content_excerpt})"
                 detailed_strengths.append(f"- {descriptor} : {strength_comment}")
             else:
                 improvement_comment = (
                     summary_text or "Clarifier la qualité attendue."
                 )
-                if content_excerpt:
-                    improvement_comment += f" (Extrait : {content_excerpt})"
                 detailed_improvements.append(
                     f"- {descriptor} : {improvement_comment}"
                 )
@@ -3426,8 +3539,6 @@ Google's Gemini Advancements..."}
                 point_fort_parts.append(f"Analyse : {summary_text}")
             elif is_high_score:
                 point_fort_parts.append("Analyse : Livrable conforme.")
-            if content_excerpt:
-                point_fort_parts.append(f"Contenu : {content_excerpt}")
             if not point_fort_parts:
                 point_fort_parts.append("Analyse : Livrable conforme.")
             point_fort_text = " · ".join(point_fort_parts)
@@ -3443,8 +3554,6 @@ Google's Gemini Advancements..."}
                 )
             else:
                 axes_parts.append("Surveiller la continuité de la qualité livrée.")
-            if content_excerpt:
-                axes_parts.append(f"Contenu : {content_excerpt}")
             axes_text = " · ".join(
                 _clean_inline_text(part) for part in axes_parts if part.strip()
             )
@@ -3498,14 +3607,13 @@ Google's Gemini Advancements..."}
         positive_highlights = []
         for info in high_quality_steps:
             base_summary = info["summary"] or "Livrable conforme aux attentes."
-            highlight = "Étape {index} – {label} ({score}) : {summary}".format(
+            highlight = "Étape {index} – {label} ({score})".format(
                 index=info["index"],
                 label=info["label"],
                 score=info["score_display"],
-                summary=base_summary,
             )
-            if info.get("excerpt"):
-                highlight += f" (Extrait : {info['excerpt']})"
+            if base_summary:
+                highlight += f" : {base_summary}"
             positive_highlights.append(highlight)
 
         vigilance_highlights: list[str] = []
@@ -3515,8 +3623,6 @@ Google's Gemini Advancements..."}
             focus_items = issues if issues else suggestions
             if focus_items:
                 focus_text = "; ".join(focus_items)
-                if info.get("excerpt"):
-                    focus_text += f" ; Extrait : {info['excerpt']}"
                 vigilance_highlights.append(
                     "Étape {index} – {label} ({score}) : {focus}".format(
                         index=info["index"],
@@ -3525,59 +3631,6 @@ Google's Gemini Advancements..."}
                         focus=focus_text,
                     )
                 )
-
-        resume_lines: list[str] = []
-        if step_infos:
-            resume_lines.append(
-                f"- Portée : {len(step_infos)} étape(s) étudiée(s) avec consolidation des livrables."
-            )
-
-            if positive_highlights:
-                resume_lines.append(
-                    "- Points forts : "
-                    + "; ".join(positive_highlights[:2])
-                    + ("; …" if len(positive_highlights) > 2 else ".")
-                )
-
-            if vigilance_highlights:
-                resume_lines.append(
-                    "- Vigilances : "
-                    + "; ".join(vigilance_highlights[:2])
-                    + ("; …" if len(vigilance_highlights) > 2 else ".")
-                )
-
-            if transcript_excerpt:
-                resume_lines.append(f"- Contenu clé : {transcript_excerpt}")
-
-            if vigilance_highlights:
-                principal_action = vigilance_highlights[0]
-                resume_lines.append(
-                    "- Actions critiques : "
-                    + principal_action
-                    + ("; autres recommandations à prioriser." if len(vigilance_highlights) > 1 else ".")
-                )
-            elif not vigilance_highlights and positive_highlights:
-                resume_lines.append(
-                    "- Actions critiques : Aucun blocage identifié, poursuivre la validation finale."
-                )
-            else:
-                resume_lines.append(
-                    "- Actions critiques : Aucune analyse exploitable disponible."
-                )
-        else:
-            resume_lines.append("- Aucun travail exécuté n'a pu être analysé.")
-
-        table_rows: list[str] = []
-        for info in step_infos:
-            table_rows.append(
-                "| Étape {index} – {label} | {score} | {strength} | {axis} |".format(
-                    index=info["index"],
-                    label=info["label"],
-                    score=info["score_display"],
-                    strength=_clean_inline_text(info["points_forts"]),
-                    axis=_clean_inline_text(info["axes"]),
-                )
-            )
 
         priority_entries: list[tuple[float, int, str, str]] = []
         for info in step_infos:
@@ -3598,6 +3651,72 @@ Google's Gemini Advancements..."}
 
         priority_entries.sort(key=lambda item: (item[0], item[1]))
 
+        resume_lines: list[str] = []
+        if step_infos:
+            resume_lines.append(
+                f"- Portée : {len(step_infos)} étape(s) étudiée(s) avec consolidation des livrables."
+            )
+
+            treated_line = "; ".join(
+                "Étape {index} – {label} ({score})".format(
+                    index=info["index"],
+                    label=info["label"],
+                    score=info["score_display"],
+                )
+                for info in step_infos
+            )
+            resume_lines.append(f"- Livrables traités : {treated_line}.")
+
+            if positive_highlights:
+                resume_lines.append(
+                    "- Points forts : "
+                    + "; ".join(positive_highlights[:2])
+                    + ("; …" if len(positive_highlights) > 2 else ".")
+                )
+            else:
+                resume_lines.append(
+                    "- Points forts : Aucun point fort automatique détecté."
+                )
+
+            if vigilance_highlights:
+                resume_lines.append(
+                    "- Axes de vigilance : "
+                    + "; ".join(vigilance_highlights[:2])
+                    + ("; …" if len(vigilance_highlights) > 2 else ".")
+                )
+            else:
+                resume_lines.append(
+                    "- Axes de vigilance : Aucun point critique détecté."
+                )
+
+            if priority_entries:
+                top_priority = priority_entries[0]
+                resume_lines.append(
+                    "- Actions critiques : Étape {index} – {label} : {action}.".format(
+                        index=top_priority[1],
+                        label=top_priority[2],
+                        action=_clean_inline_text(top_priority[3]),
+                    )
+                )
+            else:
+                resume_lines.append(
+                    "- Actions critiques : Aucun suivi supplémentaire exigé."
+                )
+        else:
+            resume_lines.append("- Aucun travail exécuté n'a pu être analysé.")
+
+        table_rows: list[str] = []
+        for info in step_infos:
+            table_rows.append(
+                "| Étape {index} – {label} | {score} | {strength} | {axis} |".format(
+                    index=info["index"],
+                    label=info["label"],
+                    score=info["score_display"],
+                    strength=_clean_inline_text(info["points_forts"]),
+                    axis=_clean_inline_text(info["axes"]),
+                )
+            )
+
         if not priority_entries:
             priority_list = ["- Étape 1 – priorités : Aucun suivi supplémentaire exigé."]
         else:
@@ -3610,18 +3729,31 @@ Google's Gemini Advancements..."}
                 for _, index, label, action_text in priority_entries
             ]
 
+        goal_summary = _clean_inline_text(plan.goal)
+        executed_labels = [
+            f"Étape {info['index']} – {info['label']}" for info in step_infos
+        ]
+
         global_analysis_fragments: list[str] = []
+        if goal_summary:
+            global_analysis_fragments.append(f"Objectif initial : {goal_summary}.")
+        if executed_labels:
+            global_analysis_fragments.append(
+                "Étapes réalisées : " + ", ".join(executed_labels) + "."
+            )
         if positive_highlights:
             global_analysis_fragments.append(
-                "Les livrables solides confirment : " + "; ".join(positive_highlights[:1]) + "."
+                "Livrables conformes : " + "; ".join(positive_highlights[:1]) + "."
             )
         if vigilance_highlights:
             global_analysis_fragments.append(
-                "Points de vigilance prioritaires : " + "; ".join(vigilance_highlights[:1]) + "."
+                "Axes d'amélioration identifiés : "
+                + "; ".join(vigilance_highlights[:1])
+                + "."
             )
-        if transcript_excerpt:
+        if not vigilance_highlights:
             global_analysis_fragments.append(
-                f"Contenu clé : {transcript_excerpt}."
+                "Axes d'amélioration identifiés : Aucun axe critique supplémentaire détecté."
             )
         if not global_analysis_fragments:
             global_analysis_fragments.append(
